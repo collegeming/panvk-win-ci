@@ -121,6 +121,37 @@ sub("src/panfrost/vulkan/panvk_vX_shader.c",
     "#include \"poly/nir/poly_nir.h\"",
     "#include \"util/strndup.h\"\n#include \"poly/nir/poly_nir.h\"")
 
+sub("src/poly/geometry.h",
+    "#include \"util/u_math.h\"",
+    "#include \"util/u_math.h\"\n\n#ifdef _WIN32\ntypedef unsigned int uint;\n#endif")
+
+sub("src/panfrost/vulkan/panvk_instance.c",
+    "#include \"util/build_id.h\"",
+    "#include \"util/build_id.h\"\n#ifdef _WIN32\n#include <string.h>\n#endif")
+
+# ELF build-id is Linux-only; Windows has no note to hash.
+build_id_block = (
+    "   const struct build_id_note *note =\n"
+    "      build_id_find_nhdr_for_addr(panvk_CreateInstance);\n"
+    "   if (!note) {\n"
+    "      return panvk_errorf(NULL, VK_ERROR_INITIALIZATION_FAILED,\n"
+    "                          \"Failed to find build-id\");\n"
+    "   }\n\n"
+    "   unsigned build_id_len = build_id_length(note);\n"
+    "   if (build_id_len < BUILD_ID_EXPECTED_HASH_LENGTH) {\n"
+    "      return panvk_errorf(NULL, VK_ERROR_INITIALIZATION_FAILED,\n"
+    "                          \"build-id too short.  It needs to be a SHA\");\n"
+    "   }\n")
+sub("src/panfrost/vulkan/panvk_instance.c", build_id_block,
+    "#ifndef _WIN32\n" + build_id_block + "#endif\n")
+sub("src/panfrost/vulkan/panvk_instance.c",
+    "   copy_build_id_to_sha1(instance->driver_build_sha, note);",
+    "#ifdef _WIN32\n"
+    "   memset(instance->driver_build_sha, 0, sizeof(instance->driver_build_sha));\n"
+    "#else\n"
+    "   copy_build_id_to_sha1(instance->driver_build_sha, note);\n"
+    "#endif")
+
 sub("src/util/u_math.c",
     "#elif DETECT_CC_MSVC\n      fpstate = (unsigned)_ReadStatusReg(ARM64_FPCR);",
     "#elif DETECT_CC_MSVC && !defined(__clang__) /* clang-cl: no ARM64_FPCR */\n"

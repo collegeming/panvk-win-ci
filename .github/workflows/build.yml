@@ -110,6 +110,7 @@ jobs:
           git clone --depth 1 --branch feature/mali-kbase-native-context `
             https://github.com/MollySophia/mesa-manet mesa
           Copy-Item -Recurse vendor\win32-compat mesa\include\win32-compat
+          Copy-Item vendor\mesa-overlay\kbase_virtio.h mesa\src\panfrost\lib\kmod\kbase_virtio.h
           Copy-Item vendor\win32-compat\malikm_ioctl.h, vendor\win32-compat\maliwddm_abi.h mesa\include\win32-compat\
           $patches = @('0003','0004','0005','0006','0007','0008','0009','0010','0011','0016','0053','0055','0061')
           foreach ($n in $patches) {
