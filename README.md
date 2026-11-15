@@ -10,25 +10,32 @@ capset6 `KBAS`、props 781 B、CSIF 24 B、两轮 connect/teardown PASS。
 
 ## 当前状态（2026-11-15）
 
-- GitHub Actions run `43727588560`（`mesa-panvk-win32`）成功。
+- GitHub Actions run `43730976085`（`mesa-panvk-win32`）成功。
 - Artifact `mesa-panvk-win32` 内容：
 
 | 文件 | 说明 |
 | --- | --- |
 | `out/vulkan_manet.dll` | ARM64 PanVK ICD，PE machine `0xAA64` |
 | `out/vulkan_virtio.dll` | 同一文件，供 UMD 按 `vulkan_virtio.dll` 加载 |
+| `out/vcruntime140.dll` | ARM64 VC 运行库（客机缺 VCRUNTIME140 时使用） |
 | `out/vulkan_virtio_icd.json` | `VK_DRIVER_FILES` 用，`library_path=./vulkan_virtio.dll` |
 | `out/manet_icd.json` | Mesa 原始 manifest（路径是构建树相对路径） |
 | `out/vk_enum.exe` | loader-free 枚举/CreateDevice 冒烟程序 |
 | `out/vk_enum.out` | runner 上的运行输出 |
-| `out/SHA256SUMS.txt` | 两个 DLL 的 SHA256 |
+| `out/SHA256SUMS.txt` | DLL 与 vcruntime 的 SHA256 |
 | `out/exports.txt` | `llvm-readobj --file-headers --coff-exports` 输出 |
 | `build.log` | 完整 ninja 日志 |
 
 `vulkan_virtio.dll` SHA256：
 
 ```
-4F06FCFC556A2B82CBED721ED97C2D81EBB3E5B423A49B68120B51350E3E250A
+6468038C8D43C05C7101A042B3B11A3E43790F7D82BDC53F8B6ABC9641878C15
+```
+
+`vcruntime140.dll` SHA256：
+
+```
+C600AFF0ED497AE5C0E4E5CC515B31E0C694F01E893B1B1038441235A037F7F3
 ```
 
 runner 上的 loader-free 冒烟结果（无 virtio 适配器，因此 0 设备）：
@@ -38,7 +45,23 @@ ICD loaded: ...\vulkan_manet.dll
 instance extensions: result=0 (VK_SUCCESS) count=7
 vkCreateInstance: result=0 (VK_SUCCESS)
 vkEnumeratePhysicalDevices(count): result=0 (VK_SUCCESS) count=0
+[panvk-win] enumerate: Windows kbase branch, HAVE_PAN_KMOD_KBASE=1
+[panvk-win] create_kmod_dev_kbase path=wddm
+[panvk-win] _open(NUL) fd=3 errno=0
+[panvk-win] calling pan_kmod_dev_create_with_driver("kbase") fd=3 flags=0x1
+[kbv-win] kbv_init fd=3: calling vdrm_device_connect(type=0x4b424153)
+[vdrm-wddm] connect entry: fd=-1 context_type=0x4b424153
+[vdrm-wddm] dispatch_init ok
+[vdrm-wddm] EnumAdapters2(count): status=0x00000000 num_adapters=34
+[vdrm-wddm] EnumAdapters2(list): status=0x00000000 num_adapters=2
+[vdrm-wddm] adapter[0]: ... tag=0x0000320000000002 ... match=0
+[vdrm-wddm] adapter[1]: ... tag=0x0000320000000002 ... match=0
+[vdrm-wddm] no virtio WDDM adapter found (tag=0x464e495041444156)
+[vdrm-wddm] connect failed at stage 'adapter enumeration'
 ```
+
+runner 没有 virtio WDDM 适配器，所以最后停在 adapter enumeration 是预期；
+客机上应能命中 `VADAPINF` 并继续到 ContextInit / props / CSIF。
 
 导出表确认包含：
 
