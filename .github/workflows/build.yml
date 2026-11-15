@@ -13,6 +13,10 @@ permissions:
 
 jobs:
   libpan:
+    # libpan and libpoly shaders are platform independent and already uploaded
+    # by run 43720536739.  Keep the job for a manual refresh, but skip it by
+    # default so the Windows iteration loop is several minutes shorter.
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -66,7 +70,6 @@ jobs:
           if-no-files-found: error
 
   panvk:
-    needs: libpan
     runs-on: windows-11-arm
     timeout-minutes: 120
     steps:
@@ -75,10 +78,14 @@ jobs:
         with:
           name: libpan-prebuilt
           path: libpan
+          run-id: 43720536739
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
         with:
           name: libpoly-prebuilt
           path: libpoly
+          run-id: 43720536739
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
