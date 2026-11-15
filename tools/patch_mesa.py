@@ -273,7 +273,7 @@ sub("src/panfrost/vulkan/panvk_instance.c",
 # --------------------------------------------------------------------------
 sub("src/panfrost/vulkan/panvk_physical_device.c",
     "#include <errno.h>",
-    "#include <errno.h>\n#ifdef _WIN32\n#include <io.h>\n#include <fcntl.h>\n#endif")
+    "#include <errno.h>\n#ifdef _WIN32\n#include <io.h>\n#include <fcntl.h>\n#define strtok_r strtok_s\n#endif")
 
 sub("src/panfrost/vulkan/panvk_physical_device.c",
     "   fd = open(path, O_RDWR | O_CLOEXEC);",
@@ -300,8 +300,18 @@ sub("src/panfrost/vulkan/panvk_physical_device.c",
 
 # The DRM-only init path is not built on Windows.  The kbase init after it is.
 wrap("src/panfrost/vulkan/panvk_physical_device.c",
+     "static VkResult\ncreate_kmod_dev(",
+     "#if defined(HAVE_PAN_KMOD_KBASE)",
+     "#ifndef _WIN32\n")
+
+wrap("src/panfrost/vulkan/panvk_physical_device.c",
      "static VkResult\nget_drm_device_ids",
-     "static VkResult\nget_core_mask",
+     "static void\ninit_shader_caches",
+     "#ifndef _WIN32\n")
+
+wrap("src/panfrost/vulkan/panvk_physical_device.c",
+     "static VkResult\nget_device_sync_types(",
+     "#if defined(HAVE_PAN_KMOD_KBASE)",
      "#ifndef _WIN32\n")
 
 wrap("src/panfrost/vulkan/panvk_physical_device.c",
