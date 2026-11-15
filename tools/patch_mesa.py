@@ -74,6 +74,11 @@ sub("src/panfrost/vulkan/meson.build",
     "endif")
 
 sub("src/panfrost/vulkan/meson.build",
+    "  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],",
+    "  vs_module_defs : 'vulkan_manet.def',\n"
+    "  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],")
+
+sub("src/panfrost/vulkan/meson.build",
     "  [libpanvk_files, panvk_entrypoints, panvk_tracepoints, panvk_drirc],",
     "  [libpanvk_files, panvk_entrypoints, panvk_tracepoints, panvk_drirc,\n"
     "   files('panvk_win_rt_stubs.c')],")

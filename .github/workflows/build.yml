@@ -112,6 +112,7 @@ jobs:
           Copy-Item -Recurse vendor\win32-compat mesa\include\win32-compat
           Copy-Item vendor\mesa-overlay\kbase_virtio.h mesa\src\panfrost\lib\kmod\kbase_virtio.h
           Copy-Item vendor\mesa-overlay\panvk_win_rt_stubs.c mesa\src\panfrost\vulkan\panvk_win_rt_stubs.c
+          Copy-Item vendor\mesa-overlay\vulkan_manet.def mesa\src\panfrost\vulkan\vulkan_manet.def
           Copy-Item vendor\win32-compat\malikm_ioctl.h, vendor\win32-compat\maliwddm_abi.h mesa\include\win32-compat\
           $patches = @('0003','0004','0005','0006','0007','0008','0009','0010','0011','0016','0053','0055','0061')
           foreach ($n in $patches) {
@@ -173,12 +174,37 @@ jobs:
           Select-String -Path build.log -Pattern ' error C| error LNK|fatal error| error:' | Select-Object -First 80 | ForEach-Object { $_.Line }
           if ($fail.Count -gt 0) { throw 'build failed' }
           Get-ChildItem build -Recurse -Filter '*vulkan_manet*' | Select-Object FullName
+      - name: Package ARM64 ICD artifact
+        shell: pwsh
+        run: |
+          $dll = (Get-ChildItem build -Recurse -Filter vulkan_manet.dll | Select-Object -First 1).FullName
+          if (-not $dll) { throw 'vulkan_manet.dll missing' }
+          $icd = (Get-ChildItem build -Recurse -Filter 'manet_icd*.json' | Select-Object -First 1).FullName
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item $dll out\vulkan_manet.dll
+          Copy-Item $dll out\vulkan_virtio.dll
+          if ($icd) { Copy-Item $icd out\manet_icd.json }
+          '{"file_format_version":"1.0.1","ICD":{"library_path":"./vulkan_virtio.dll","api_version":"1.4.363"}}' |
+            Set-Content -Encoding ascii out\vulkan_virtio_icd.json
+          $h = Get-FileHash out\vulkan_virtio.dll -Algorithm SHA256
+          "$($h.Hash)  vulkan_virtio.dll" | Tee-Object -FilePath out\SHA256SUMS.txt
+          "$($h.Hash)  vulkan_manet.dll" | Add-Content out\SHA256SUMS.txt
+          $b = [IO.File]::ReadAllBytes((Resolve-Path out\vulkan_virtio.dll))
+          $pe = [BitConverter]::ToInt32($b, 0x3c)
+          $machine = [BitConverter]::ToUInt16($b, $pe + 4)
+          "PE machine = 0x{0:X4} (expect 0xAA64)" -f $machine
+          if ($machine -ne 0xAA64) { throw 'not an ARM64 PE' }
+          $ro = 'C:\Program Files\LLVM\bin\llvm-readobj.exe'
+          if (Test-Path $ro) {
+            & $ro --file-headers --coff-exports out\vulkan_virtio.dll | Tee-Object out\exports.txt
+          } else {
+            Write-Host 'llvm-readobj not found; exports not listed'
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: mesa-panvk-win32
           path: |
             build.log
-            build/**/vulkan_manet.dll
-            build/**/manet_icd*.json
+            out/*
           if-no-files-found: warn

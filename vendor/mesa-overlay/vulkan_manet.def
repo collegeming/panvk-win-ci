@@ -1,0 +1,6 @@
+LIBRARY vulkan_manet
+EXPORTS
+    vk_icdGetInstanceProcAddr
+    vk_icdGetPhysicalDeviceProcAddr
+    vk_icdNegotiateLoaderICDInterfaceVersion
+    vk_icdEnumerateAdapterPhysicalDevices
