@@ -1,0 +1,151 @@
+name: mesa-panvk-win32
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tools/**'
+      - 'vendor/**'
+      - '.github/workflows/build.yml'
+permissions:
+  contents: read
+
+jobs:
+  libpan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            llvm-18-dev libclang-18-dev libclang-cpp18-dev libclc-18-dev \
+            libllvmspirvlib-18-dev spirv-tools glslang-tools libdrm-dev \
+            python3-mako python3-yaml python3-packaging bison flex pkg-config \
+            libexpat1-dev zlib1g-dev ninja-build
+          python3 -m pip install --break-system-packages meson
+      - name: Mesa source
+        run: |
+          git clone --depth 1 --branch feature/mali-kbase-native-context \
+            https://github.com/MollySophia/mesa-manet mesa
+      - name: Configure
+        run: |
+          meson setup build mesa -Dbuildtype=release \
+            -Dgallium-drivers=panfrost -Dvulkan-drivers= -Dplatforms= \
+            -Dglx=disabled -Degl=disabled -Dgbm=disabled \
+            -Dllvm=enabled -Dmesa-clc=enabled -Dvideo-codecs= -Dbuild-tests=false \
+            || { tail -80 build/meson-logs/meson-log.txt; exit 1; }
+      - name: Build libpan + shaders
+        run: |
+          targets=""
+          for v in 4 5 6 7 9 10 11 12 13 14 15; do
+            targets="$targets src/panfrost/libpan/libpan_v$v.spv \
+              src/panfrost/libpan/libpan_v$v.cpp \
+              src/panfrost/libpan/libpan_v$v.h \
+              src/panfrost/libpan/libpan_shaders_v$v.c \
+              src/panfrost/libpan/libpan_shaders_v$v.h"
+          done
+          ninja -C build $targets || { tail -80 build/meson-logs/meson-log.txt; exit 1; }
+          mkdir -p libpan
+          cp build/src/panfrost/libpan/libpan_v*.* build/src/panfrost/libpan/libpan_shaders_v*.* libpan/
+          ls -la libpan | head
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libpan-prebuilt
+          path: libpan/
+          if-no-files-found: error
+
+  panvk:
+    needs: libpan
+    runs-on: windows-11-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: libpan-prebuilt
+          path: libpan
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Build tools
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja mako pyyaml packaging
+          $u = 'https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip'
+          Invoke-WebRequest $u -OutFile wfb.zip
+          Expand-Archive wfb.zip -DestinationPath C:\winflexbison
+          "C:\winflexbison" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+      - name: Mesa source and patches
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch feature/mali-kbase-native-context `
+            https://github.com/MollySophia/mesa-manet mesa
+          Copy-Item -Recurse vendor\win32-compat mesa\include\win32-compat
+          Copy-Item vendor\win32-compat\malikm_ioctl.h, vendor\win32-compat\maliwddm_abi.h mesa\include\win32-compat\
+          $patches = @('0003','0004','0005','0006','0007','0008','0009','0010','0011','0016','0053','0055','0061')
+          foreach ($n in $patches) {
+            $p = Get-ChildItem vendor\mesa-patches -Filter "$n-*.patch" | Select-Object -First 1
+            if (-not $p) { throw "missing patch $n" }
+            Write-Host "applying $($p.Name)"
+            git -C mesa apply --3way --whitespace=nowarn `
+              --include='src/panfrost/*' --include='src/util/*' --include='src/compiler/*' `
+              --include='include/*' --include='meson.build' --include='src/meson.build' `
+              $p.FullName
+            if ($LASTEXITCODE) { throw "patch failed: $($p.Name)" }
+          }
+          Copy-Item libpan\* mesa\src\panfrost\libpan\ -Force
+          Copy-Item vendor\libpan-prebuilt.meson.build mesa\src\panfrost\libpan\meson.build -Force
+          New-Item -ItemType Directory -Force mesa\src\panfrost\lib\kmod\vdrm | Out-Null
+          Copy-Item src\vdrm\* mesa\src\panfrost\lib\kmod\vdrm\ -Force
+          Copy-Item src\mali_kbase_vdrm_win.c mesa\src\panfrost\lib\kmod\ -Force
+          Copy-Item src\win32_stubs.c mesa\src\panfrost\lib\kmod\ -Force
+          python tools\patch_mesa.py mesa
+          if ($LASTEXITCODE) { throw 'patch_mesa.py failed' }
+      - name: Configure
+        shell: pwsh
+        run: |
+          $llvm = Join-Path $env:VCINSTALLDIR 'Tools\Llvm\ARM64\bin'
+          $env:CC = Join-Path $llvm 'clang-cl.exe'
+          $env:CXX = $env:CC
+          & $env:CC --version
+          meson setup build mesa --backend=ninja `
+            -Dbuildtype=debugoptimized `
+            -Dplatforms=windows `
+            -Dvulkan-drivers=panfrost `
+            '-Dgallium-drivers=' `
+            -Dmesa-clc=disabled `
+            -Dllvm=disabled `
+            -Dopengl=false -Dgles1=disabled -Dgles2=disabled `
+            -Degl=disabled -Dglx=disabled -Dgbm=disabled `
+            '-Dvideo-codecs=' -Dmicrosoft-clc=disabled -Dspirv-to-dxil=false `
+            -Dzstd=disabled -Dshader-cache=disabled -Dbuild-tests=false `
+            -Dpanfrost-kmds=kbase `
+            '-Dc_args=-DHAVE_FUNC_ATTRIBUTE_PACKED -D_wassert=mali_wassert' `
+            '-Dcpp_args=-DHAVE_FUNC_ATTRIBUTE_PACKED -D_wassert=mali_wassert'
+          if ($LASTEXITCODE) { if (Test-Path build\meson-logs\meson-log.txt) { Get-Content build\meson-logs\meson-log.txt -Tail 100 }; throw 'meson setup failed' }
+      - name: Build
+        shell: pwsh
+        run: |
+          ninja -C build -k 0 2>&1 | Tee-Object build.log
+          $fail = Select-String -Path build.log -Pattern 'FAILED:' | Measure-Object
+          Write-Host "failed build steps: $($fail.Count)"
+          Select-String -Path build.log -Pattern ' error C| error LNK|fatal error| error:' | Select-Object -First 80 | ForEach-Object { $_.Line }
+          if ($fail.Count -gt 0) { throw 'build failed' }
+          Get-ChildItem build -Recurse -Filter '*vulkan_manet*' | Select-Object FullName
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mesa-panvk-win32
+          path: |
+            build.log
+            build/**/vulkan_manet.dll
+            build/**/manet_icd*.json
+          if-no-files-found: warn

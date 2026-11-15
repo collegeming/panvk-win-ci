@@ -1,0 +1,15 @@
+libpan_versions = ['4', '5', '6', '7', '9', '10', '11', '12', '13', '14', '15']
+
+idep_libpan_per_arch = {}
+
+foreach ver : libpan_versions
+  idep_libpan_per_arch += {
+    ver: declare_dependency(
+      sources: [
+        files('libpan_v' + ver + '.cpp'),
+        files('libpan_shaders_v' + ver + '.c'),
+      ],
+      include_directories : include_directories('.'),
+    ),
+  }
+endforeach

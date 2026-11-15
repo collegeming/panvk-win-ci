@@ -1,0 +1,11 @@
+This build-only repository vendors:
+
+- mesa-patches/ and win32-compat/ from https://github.com/gahingwoo/wddm-mali-g52
+  (GPL-2.0; see COPYING). These are Windows portability patches for Mesa
+  Panfrost and the related POSIX shims. They are used to compile the manet
+  Mesa 26.3 PanVK branch on Windows.
+- src/vdrm/ from https://github.com/collegeming/win-panvk-probe, derived
+  from Mesa vdrm (MIT) and DroidVM's vdrm_wddm.c (MIT).
+- src/mali_kbase_vdrm_win.c (MIT), the kbv RPC transport over vdrm.
+
+No device credentials or private keys are stored here.
