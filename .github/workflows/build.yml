@@ -136,8 +136,8 @@ jobs:
             '-Dvideo-codecs=' -Dmicrosoft-clc=disabled -Dspirv-to-dxil=false `
             -Dzstd=disabled -Dshader-cache=disabled -Dbuild-tests=false `
             -Dpanfrost-kmds=kbase `
-            '-Dc_args=-DHAVE_FUNC_ATTRIBUTE_PACKED -D_wassert=mali_wassert' `
-            '-Dcpp_args=-DHAVE_FUNC_ATTRIBUTE_PACKED -D_wassert=mali_wassert'
+            '-Dc_args=-DHAVE_FUNC_ATTRIBUTE_PACKED' `
+            '-Dcpp_args=-DHAVE_FUNC_ATTRIBUTE_PACKED'
           if ($LASTEXITCODE) { if (Test-Path build\meson-logs\meson-log.txt) { Get-Content build\meson-logs\meson-log.txt -Tail 100 }; throw 'meson setup failed' }
       - name: Build
         shell: pwsh
