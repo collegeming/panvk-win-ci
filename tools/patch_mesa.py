@@ -298,7 +298,10 @@ sub("src/panfrost/vulkan/panvk_physical_device.c",
     "#include <pthread.h>\n#define strtok_r strtok_s\n#endif")
 
 sub("src/panfrost/vulkan/panvk_physical_device.c",
-    "   fd = open(path, O_RDWR | O_CLOEXEC);",
+    "   fd = open(path, O_RDWR | O_CLOEXEC);\n"
+    "   if (fd < 0) {\n"
+    "      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,\n"
+    "                          \"failed to open kbase device %s\", path);",
     "#ifdef _WIN32\n"
     "   /* vdrm owns the KMD connection; the CRT fd is only a kbv key. */\n"
     "   fprintf(stderr, \"[panvk-win] create_kmod_dev_kbase path=%s\\n\", path);\n"
@@ -307,7 +310,10 @@ sub("src/panfrost/vulkan/panvk_physical_device.c",
     "   fflush(stderr);\n"
     "#else\n"
     "   fd = open(path, O_RDWR | O_CLOEXEC);\n"
-    "#endif")
+    "#endif\n"
+    "   if (fd < 0) {\n"
+    "      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,\n"
+    "                          \"failed to open kbase device %s\", path);")
 
 sub("src/panfrost/vulkan/panvk_physical_device.c",
     "   device->kmod.dev = pan_kmod_dev_create_with_driver(fd, flags, \"kbase\", NULL,\n"
