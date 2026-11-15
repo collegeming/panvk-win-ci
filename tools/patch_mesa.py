@@ -117,6 +117,17 @@ sub("src/panfrost/compiler/bifrost/bi_spill_ssa.c",
     "#ifdef _WIN32\n#include <malloc.h>\n#define alloca _alloca\n#endif\n\n"
     "#include \"util/bitset.h\"")
 
+sub("src/panfrost/lib/pan_trace.c",
+    "#include <string.h>",
+    "#include <string.h>\n#ifdef _WIN32\n#define strncasecmp _strnicmp\n#endif")
+
+sub("src/panfrost/vulkan/panvk_physical_device.c",
+    "#include <sys/sysinfo.h>",
+    "#ifndef _WIN32\n#include <sys/sysinfo.h>\n#endif")
+sub("src/panfrost/vulkan/panvk_physical_device.c",
+    "#include <linux/sync_file.h>",
+    "#ifndef _WIN32\n#include <linux/sync_file.h>\n#endif")
+
 sub("src/panfrost/vulkan/panvk_vX_shader.c",
     "#include \"poly/nir/poly_nir.h\"",
     "#include \"util/strndup.h\"\n#include \"poly/nir/poly_nir.h\"")
