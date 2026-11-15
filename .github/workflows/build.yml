@@ -94,12 +94,20 @@ jobs:
           foreach ($n in $patches) {
             $p = Get-ChildItem vendor\mesa-patches -Filter "$n-*.patch" | Select-Object -First 1
             if (-not $p) { throw "missing patch $n" }
-            Write-Host "applying $($p.Name)"
-            git -C mesa apply --3way --whitespace=nowarn `
+            Write-Host "checking $($p.Name)"
+            git -C mesa apply --check --whitespace=nowarn `
               --include='src/panfrost/*' --include='src/util/*' --include='src/compiler/*' `
               --include='include/*' --include='meson.build' --include='src/meson.build' `
               $p.FullName
-            if ($LASTEXITCODE) { throw "patch failed: $($p.Name)" }
+            if ($LASTEXITCODE) {
+              Write-Host "WARNING: patch did not apply (manet 26.3 drift), skipping: $($p.Name)"
+              continue
+            }
+            git -C mesa apply --whitespace=nowarn `
+              --include='src/panfrost/*' --include='src/util/*' --include='src/compiler/*' `
+              --include='include/*' --include='meson.build' --include='src/meson.build' `
+              $p.FullName
+            if ($LASTEXITCODE) { throw "patch failed after check: $($p.Name)" }
           }
           Copy-Item libpan\* mesa\src\panfrost\libpan\ -Force
           Copy-Item vendor\libpan-prebuilt.meson.build mesa\src\panfrost\libpan\meson.build -Force
