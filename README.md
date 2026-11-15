@@ -10,7 +10,7 @@ capset6 `KBAS`、props 781 B、CSIF 24 B、两轮 connect/teardown PASS。
 
 ## 当前状态（2026-11-15）
 
-- GitHub Actions run `43726791678`（`mesa-panvk-win32`）成功。
+- GitHub Actions run `43727588560`（`mesa-panvk-win32`）成功。
 - Artifact `mesa-panvk-win32` 内容：
 
 | 文件 | 说明 |
@@ -19,6 +19,8 @@ capset6 `KBAS`、props 781 B、CSIF 24 B、两轮 connect/teardown PASS。
 | `out/vulkan_virtio.dll` | 同一文件，供 UMD 按 `vulkan_virtio.dll` 加载 |
 | `out/vulkan_virtio_icd.json` | `VK_DRIVER_FILES` 用，`library_path=./vulkan_virtio.dll` |
 | `out/manet_icd.json` | Mesa 原始 manifest（路径是构建树相对路径） |
+| `out/vk_enum.exe` | loader-free 枚举/CreateDevice 冒烟程序 |
+| `out/vk_enum.out` | runner 上的运行输出 |
 | `out/SHA256SUMS.txt` | 两个 DLL 的 SHA256 |
 | `out/exports.txt` | `llvm-readobj --file-headers --coff-exports` 输出 |
 | `build.log` | 完整 ninja 日志 |
@@ -26,7 +28,16 @@ capset6 `KBAS`、props 781 B、CSIF 24 B、两轮 connect/teardown PASS。
 `vulkan_virtio.dll` SHA256：
 
 ```
-E7ED77F4EA706768E907BC947ED78479ED65A26872598B162FE144B780BEFE3A
+4F06FCFC556A2B82CBED721ED97C2D81EBB3E5B423A49B68120B51350E3E250A
+```
+
+runner 上的 loader-free 冒烟结果（无 virtio 适配器，因此 0 设备）：
+
+```
+ICD loaded: ...\vulkan_manet.dll
+instance extensions: result=0 (VK_SUCCESS) count=7
+vkCreateInstance: result=0 (VK_SUCCESS)
+vkEnumeratePhysicalDevices(count): result=0 (VK_SUCCESS) count=0
 ```
 
 导出表确认包含：
@@ -60,6 +71,13 @@ Meson/Ninja、winflexbison、clang-cl `/MD`。
 ## 客机验证
 
 把 artifact 解压到例如 `C:\panvk\`，然后：
+
+```bat
+C:\panvk\vk_enum.exe C:\panvk\vulkan_virtio.dll
+```
+
+期望在真实客机上看到 1 个 `Mali G2-Ultra` 设备、`vkCreateDevice` 返回
+`VK_SUCCESS`。也可以走 Vulkan loader：
 
 ```bat
 set VK_DRIVER_FILES=C:\panvk\vulkan_virtio_icd.json
