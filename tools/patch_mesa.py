@@ -329,8 +329,6 @@ sub("src/panfrost/lib/kmod/kbase_kmod.c",
 sub("src/panfrost/lib/kmod/kbase_kmod.c",
     "fcntl(kbase_bo->dmabuf_fd, F_DUPFD_CLOEXEC, 3)",
     "_dup(kbase_bo->dmabuf_fd)")
-sub("src/panfrost/lib/kmod/kbase_kmod.c",
-    "fcntl(fd, F_DUPFD_CLOEXEC, 0)", "_dup(fd)")
 
 print(f"patch_mesa: {changes} edits applied, {len(misses)} anchors missing")
 for m in misses:
