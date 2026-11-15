@@ -152,6 +152,7 @@ jobs:
           & $env:CC --version
           meson setup build mesa --backend=ninja `
             -Dbuildtype=debugoptimized `
+            -Db_vscrt=mt `
             -Dplatforms=windows `
             -Dvulkan-drivers=panfrost `
             '-Dgallium-drivers=' `

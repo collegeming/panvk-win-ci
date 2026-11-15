@@ -148,7 +148,10 @@ sub("src/poly/geometry.h",
 
 sub("src/panfrost/vulkan/panvk_instance.c",
     "#include \"util/build_id.h\"",
-    "#include \"util/build_id.h\"\n#ifdef _WIN32\n#include <string.h>\n#endif")
+    "#include \"util/build_id.h\"\n#ifdef _WIN32\n#include <string.h>\n"
+    "#if !defined(HAVE_PAN_KMOD_KBASE)\n"
+    "#error \"Windows PanVK enumeration requires HAVE_PAN_KMOD_KBASE\"\n"
+    "#endif\n#endif")
 
 # ELF build-id is Linux-only; Windows has no note to hash.
 build_id_block = (
@@ -256,6 +259,8 @@ sub("src/panfrost/vulkan/panvk_instance.c",
     "#if defined(HAVE_PAN_KMOD_KBASE)\n"
     "#ifdef _WIN32\n"
     "   /* Windows: one virtio WDDM kbase device; vdrm owns the connection. */\n"
+    "   fprintf(stderr, \"[panvk-win] enumerate: Windows kbase branch, HAVE_PAN_KMOD_KBASE=1\\n\");\n"
+    "   fflush(stderr);\n"
     "   struct panvk_physical_device *device =\n"
     "      vk_zalloc(&instance->vk.alloc, sizeof(*device), 8,\n"
     "                VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);\n"
@@ -263,6 +268,9 @@ sub("src/panfrost/vulkan/panvk_instance.c",
     "      return panvk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);\n"
     "   VkResult result =\n"
     "      panvk_physical_device_init_kbase(device, instance, \"wddm\");\n"
+    "   fprintf(stderr, \"[panvk-win] init_kbase(\\\"wddm\\\") -> %d (%s)\\n\",\n"
+    "           (int)result, result == VK_SUCCESS ? \"VK_SUCCESS\" : \"error\");\n"
+    "   fflush(stderr);\n"
     "   if (result != VK_SUCCESS) {\n"
     "      vk_free(&instance->vk.alloc, device);\n"
     "      if (result == VK_ERROR_INCOMPATIBLE_DRIVER)\n"
@@ -286,16 +294,34 @@ sub("src/panfrost/vulkan/panvk_instance.c",
 sub("src/panfrost/vulkan/panvk_physical_device.c",
     "#include <errno.h>",
     "#include <errno.h>\n#ifdef _WIN32\n#include <io.h>\n#include <fcntl.h>\n"
+    "#include <stdio.h>\n"
     "#include <pthread.h>\n#define strtok_r strtok_s\n#endif")
 
 sub("src/panfrost/vulkan/panvk_physical_device.c",
     "   fd = open(path, O_RDWR | O_CLOEXEC);",
     "#ifdef _WIN32\n"
     "   /* vdrm owns the KMD connection; the CRT fd is only a kbv key. */\n"
+    "   fprintf(stderr, \"[panvk-win] create_kmod_dev_kbase path=%s\\n\", path);\n"
     "   fd = _open(\"NUL\", _O_RDWR);\n"
+    "   fprintf(stderr, \"[panvk-win] _open(NUL) fd=%d errno=%d\\n\", fd, errno);\n"
+    "   fflush(stderr);\n"
     "#else\n"
     "   fd = open(path, O_RDWR | O_CLOEXEC);\n"
     "#endif")
+
+sub("src/panfrost/vulkan/panvk_physical_device.c",
+    "   device->kmod.dev = pan_kmod_dev_create_with_driver(fd, flags, \"kbase\", NULL,\n"
+    "                                                      &instance->kmod.allocator);\n\n"
+    "   if (!device->kmod.dev) {",
+    "   fprintf(stderr, \"[panvk-win] calling pan_kmod_dev_create_with_driver(\\\"kbase\\\") fd=%d flags=0x%x\\n\",\n"
+    "           fd, flags);\n"
+    "   fflush(stderr);\n"
+    "   device->kmod.dev = pan_kmod_dev_create_with_driver(fd, flags, \"kbase\", NULL,\n"
+    "                                                      &instance->kmod.allocator);\n"
+    "   fprintf(stderr, \"[panvk-win] pan_kmod_dev_create_with_driver -> %p\\n\",\n"
+    "           (void *)device->kmod.dev);\n"
+    "   fflush(stderr);\n\n"
+    "   if (!device->kmod.dev) {")
 
 sub("src/panfrost/vulkan/panvk_physical_device.c",
     "   configure_kbase_dvfs(path);",

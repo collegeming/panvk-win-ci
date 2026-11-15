@@ -462,6 +462,8 @@ dispatch_init(struct vdrm_wddm_dispatch *d)
    for (i = 0; i < sizeof(thunks) / sizeof(thunks[0]); i++) {
       *thunks[i].slot = (void *)GetProcAddress(d->gdi32, thunks[i].name);
       if (!*thunks[i].slot) {
+         PROBE_LOG("missing gdi32 thunk %s (error=%lu)\n",
+                   thunks[i].name, GetLastError());
          WDDM_DEBUG("missing %s (error=%lu)\n", thunks[i].name, GetLastError());
          return false;
       }
@@ -1820,6 +1822,7 @@ vdrm_wddm_connect(int fd, uint32_t context_type)
 
    (void)fd;   /* Windows 没有 fd；保留参数仅为接口一致 */
 
+   PROBE_LOG("connect entry: fd=%d context_type=0x%08x\n", fd, context_type);
    memset(&g_probe, 0, sizeof(g_probe));
 
    w = (struct vdrm_wddm *)calloc(1, sizeof(*w));
@@ -1829,8 +1832,11 @@ vdrm_wddm_connect(int fd, uint32_t context_type)
    /* 在任何 goto out 之前：失败路径统一走 wddm_close()，它会 destroy 这把锁。 */
    simple_mtx_init(&w->table_lock, mtx_plain);
 
-   if (!dispatch_init(&w->dispatch))
+   if (!dispatch_init(&w->dispatch)) {
+      PROBE_LOG("dispatch_init failed\n");
       goto out;
+   }
+   PROBE_LOG("dispatch_init ok\n");
    stage = "adapter enumeration";
 
    /* 1. 枚举适配器找 virtio。EnumAdapters2 返回的句柄用完即关，命中后按

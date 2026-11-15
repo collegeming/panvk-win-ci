@@ -94,14 +94,32 @@ static int latch_error(int fd, int ret)
 
 int kbv_init(int fd, uint16_t *major, uint16_t *minor)
 {
+   fprintf(stderr, "[kbv-win] kbv_init fd=%d: calling vdrm_device_connect(type=0x%08x)\n",
+           fd, KBV_CONTEXT_TYPE);
+   fflush(stderr);
+   _putenv_s("VDRM_WDDM_DEBUG", "1");
+   errno = 0;
    struct vdrm_device *vdev = vdrm_device_connect(-1, KBV_CONTEXT_TYPE);
    if (!vdev) {
+      fprintf(stderr, "[kbv-win] vdrm_device_connect FAILED errno=%d (%s)\n",
+              errno, strerror(errno));
+      fflush(stderr);
       errno = ENODEV;
       return -1;
    }
+   fprintf(stderr, "[kbv-win] vdrm_device_connect OK vdev=%p shmem=%p rsp=%p "
+           "caps.wire=%u caps.ctx=0x%08x caps.ver=%u.%u\n",
+           (void *)vdev, (void *)vdev->shmem, (void *)vdev->rsp_mem,
+           vdev->caps.wire_format_version, vdev->caps.context_type,
+           vdev->caps.version_major, vdev->caps.version_minor);
+   fflush(stderr);
    if (!vdev->shmem || !vdev->rsp_mem ||
        vdev->caps.wire_format_version != 2 ||
        vdev->caps.context_type != KBV_CONTEXT_TYPE) {
+      fprintf(stderr, "[kbv-win] capset/shmem mismatch: wire=%u ctx=0x%08x shmem=%p rsp=%p\n",
+              vdev->caps.wire_format_version, vdev->caps.context_type,
+              (void *)vdev->shmem, (void *)vdev->rsp_mem);
+      fflush(stderr);
       vdrm_device_close(vdev);
       errno = EPROTO;
       return -1;
