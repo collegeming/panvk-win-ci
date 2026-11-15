@@ -49,6 +49,13 @@ def wrap(rel, start_marker, end_marker, before):
 
 
 # --------------------------------------------------------------------------
+# Windows header shadow tree (POSIX/libdrm stand-ins).
+# --------------------------------------------------------------------------
+sub("include/meson.build",
+    "inc_include = [include_directories('.')]",
+    "inc_include = [include_directories('.'), include_directories('win32-compat')]")
+
+# --------------------------------------------------------------------------
 # kmod build: use the vdrm transport instead of the Linux virtgpu ioctls.
 # --------------------------------------------------------------------------
 sub("src/panfrost/lib/kmod/meson.build",
