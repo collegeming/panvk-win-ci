@@ -273,7 +273,8 @@ sub("src/panfrost/vulkan/panvk_instance.c",
 # --------------------------------------------------------------------------
 sub("src/panfrost/vulkan/panvk_physical_device.c",
     "#include <errno.h>",
-    "#include <errno.h>\n#ifdef _WIN32\n#include <io.h>\n#include <fcntl.h>\n#define strtok_r strtok_s\n#endif")
+    "#include <errno.h>\n#ifdef _WIN32\n#include <io.h>\n#include <fcntl.h>\n"
+    "#include <pthread.h>\n#define strtok_r strtok_s\n#endif")
 
 sub("src/panfrost/vulkan/panvk_physical_device.c",
     "   fd = open(path, O_RDWR | O_CLOEXEC);",
