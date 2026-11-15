@@ -266,6 +266,27 @@ sub("src/panfrost/vulkan/panvk_physical_device.h",
     "#define _WIN32_DRM_DEVICE_PTR\n"
     "typedef struct _drmDevice *drmDevicePtr;\n#endif\n#endif")
 
+# --------------------------------------------------------------------------
+# Windows POSIX memory-mapping and kbase uAPI header shims.
+# --------------------------------------------------------------------------
+sub("src/util/os_mman.h",
+    "#if DETECT_OS_POSIX\n#  include <sys/mman.h>\n#else\n#  error Unsupported OS\n#endif",
+    "#if DETECT_OS_POSIX || defined(_WIN32)\n#  include <sys/mman.h>\n#else\n#  error Unsupported OS\n#endif")
+
+sub("src/util/os_mman.h",
+    "#if DETECT_OS_ANDROID && !defined(__LP64__)",
+    "#if defined(_WIN32)\n"
+    "#  define os_mmap(addr, length, prot, flags, fd, offset) \\n"
+    "     mmap(addr, length, prot, flags, fd, (off_t)(offset))\n"
+    "static inline int os_munmap(void *addr, size_t length) { return munmap(addr, length); }\n"
+    "#elif DETECT_OS_ANDROID && !defined(__LP64__)")
+
+sub("src/panfrost/lib/kmod/vdrm/vdrm.c",
+    '#include "vdrm.h"',
+    '#include "vdrm.h"\n'
+    'static inline size_t vdrm_align(size_t x, size_t a) { return (x + (a - 1)) & ~(a - 1); }')
+
+
 print(f"patch_mesa: {changes} edits applied, {len(misses)} anchors missing")
 for m in misses:
     print("  MISS:", m)
