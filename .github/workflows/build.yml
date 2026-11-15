@@ -143,8 +143,6 @@ jobs:
           Copy-Item src\win32_stubs.c mesa\src\panfrost\lib\kmod\ -Force
           python tools\patch_mesa.py mesa
           if ($LASTEXITCODE) { throw 'patch_mesa.py failed' }
-          python tools\diag.py mesa
-          if ($LASTEXITCODE) { throw 'diag.py failed' }
       - name: Configure
         shell: pwsh
         run: |
@@ -154,6 +152,7 @@ jobs:
           & $env:CC --version
           meson setup build mesa --backend=ninja `
             -Dbuildtype=debugoptimized `
+            -Db_vscrt=mt `
             -Dplatforms=windows `
             -Dvulkan-drivers=panfrost `
             '-Dgallium-drivers=' `
@@ -164,8 +163,9 @@ jobs:
             '-Dvideo-codecs=' -Dmicrosoft-clc=disabled -Dspirv-to-dxil=false `
             -Dzstd=disabled -Dshader-cache=disabled -Dbuild-tests=false `
             -Dpanfrost-kmds=kbase `
-            '-Dc_args=-DHAVE_FUNC_ATTRIBUTE_PACKED' `
-            '-Dcpp_args=-DHAVE_FUNC_ATTRIBUTE_PACKED'
+            '-Dc_args=/MT -DHAVE_FUNC_ATTRIBUTE_PACKED' `
+            '-Dcpp_args=/MT -DHAVE_FUNC_ATTRIBUTE_PACKED' `
+            -Dc_link_args=/MT -Dcpp_link_args=/MT
           if ($LASTEXITCODE) { if (Test-Path build\meson-logs\meson-log.txt) { Get-Content build\meson-logs\meson-log.txt -Tail 100 }; throw 'meson setup failed' }
       - name: Build
         shell: pwsh
