@@ -3,8 +3,10 @@
 #pragma once
 #define IOCPARM_MASK 0x1fff
 #define IOC_VOID  0x20000000UL
-#define IOC_OUT   0x40000000UL
-#define IOC_IN    0x80000000UL
+/* Linux semantics: _IOW = _IOC_WRITE (1 << 30), _IOR = _IOC_READ (2 << 30).
+ * The host mali_kbase_renderer.c whitelist compares full request values. */
+#define IOC_OUT   0x80000000UL   /* Linux _IOC_READ  */
+#define IOC_IN    0x40000000UL   /* Linux _IOC_WRITE */
 #define IOC_INOUT (IOC_IN | IOC_OUT)
 #define _IOC(inout, group, num, len) \
    ((unsigned long)((inout) | (((len) & IOCPARM_MASK) << 16) | ((group) << 8) | (num)))
