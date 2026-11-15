@@ -87,12 +87,6 @@ jobs:
           "C:\winflexbison" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           "$pwd\ci\clc-stubs" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           "LIBPAN_PREBUILT=$pwd\libpan" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          $g = 'https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip'
-          Invoke-WebRequest $g -OutFile glslang.zip
-          Expand-Archive glslang.zip -DestinationPath C:\glslang
-          $gv = Get-ChildItem C:\glslang -Recurse -Filter glslangValidator.exe | Select-Object -First 1
-          if (-not $gv) { throw 'glslangValidator.exe missing' }
-          $gv.DirectoryName | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: arm64
