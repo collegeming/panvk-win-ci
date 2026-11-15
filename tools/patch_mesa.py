@@ -320,6 +320,13 @@ sub("src/panfrost/vulkan/panvk_physical_device.h",
     "#define _WIN32_DRM_DEVICE_PTR\n"
     "typedef struct _drmDevice *drmDevicePtr;\n#endif\n#endif")
 
+# kbase_kmod's dma-buf duplicate path uses POSIX fcntl; MSVC has _dup.
+sub("src/panfrost/lib/kmod/kbase_kmod.c",
+    "#include <fcntl.h>",
+    "#include <fcntl.h>\n#ifdef _WIN32\n#include <io.h>\n#endif")
+sub("src/panfrost/lib/kmod/kbase_kmod.c",
+    "fcntl(fd, F_DUPFD_CLOEXEC, 0)", "_dup(fd)")
+
 print(f"patch_mesa: {changes} edits applied, {len(misses)} anchors missing")
 for m in misses:
     print("  MISS:", m)
