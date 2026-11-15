@@ -518,6 +518,60 @@ sub("src/panfrost/lib/kmod/kbase_kmod.c",
     "fcntl(kbase_bo->dmabuf_fd, F_DUPFD_CLOEXEC, 3)",
     "_dup(kbase_bo->dmabuf_fd)")
 
+# --------------------------------------------------------------------------
+# Experimental Windows DXVK feature-compat override (diagnostic only).
+#
+# DXVK refuses the honest PanVK feature set during adapter selection.  When
+# PANVK_WIN_DXVK_COMPAT is set in the environment at runtime, advertise
+# exactly the features DXVK requires so the device/queue/offscreen-clear path
+# can be exercised end to end.  This is a diagnostic lie: the hardware and
+# driver support is not implemented, and the default path (environment
+# variable unset) still reports the honest values.  Delete this whole block
+# once DXVK runs without the override.
+# --------------------------------------------------------------------------
+DXVK_COMPAT_REL = "src/panfrost/vulkan/panvk_vX_physical_device.c"
+DXVK_COMPAT_ANCHOR = (
+    "      /* VK_ANDROID_external_format_resolve */\n"
+    "      .externalFormatResolve = has_gralloc && PAN_ARCH >= 10,\n"
+    "   };\n"
+    "}\n"
+)
+DXVK_COMPAT_CODE = (
+    "   };\n"
+    "\n"
+    "   /* Experimental DXVK required-feature diagnostic override.  Enabled\n"
+    "    * only when PANVK_WIN_DXVK_COMPAT is set; the default path keeps the\n"
+    "    * honest feature values above.  Advertising these features does NOT\n"
+    "    * mean the hardware or driver implements them; it only unblocks DXVK\n"
+    "    * adapter selection for transport tests.  Remove this block and the\n"
+    "    * getenv() include once DXVK runs without the override. */\n"
+    "#ifdef _WIN32\n"
+    "#define PANVK_WIN_DXVK_FEATURE_OVERRIDE 1\n"
+    "#if PANVK_WIN_DXVK_FEATURE_OVERRIDE\n"
+    "   if (getenv(\"PANVK_WIN_DXVK_COMPAT\")) {\n"
+    "      features->geometryShader = true;\n"
+    "      features->multiViewport = true;\n"
+    "      features->shaderClipDistance = true;\n"
+    "      features->shaderCullDistance = true;\n"
+    "      features->textureCompressionBC = true;\n"
+    "   }\n"
+    "#endif\n"
+    "#undef PANVK_WIN_DXVK_FEATURE_OVERRIDE\n"
+    "#endif /* _WIN32 */\n"
+    "}\n"
+)
+
+_dxvk_src = root / DXVK_COMPAT_REL
+if not _dxvk_src.exists():
+    misses.append(f"{DXVK_COMPAT_REL}: file missing")
+elif "PANVK_WIN_DXVK_COMPAT" not in _dxvk_src.read_text(
+        encoding="utf-8", errors="surrogateescape"):
+    sub(DXVK_COMPAT_REL,
+        "#include <sys/sysmacros.h>",
+        "#include <sys/sysmacros.h>\n"
+        "#ifdef _WIN32\n#include <stdlib.h>\n#endif")
+    sub(DXVK_COMPAT_REL, DXVK_COMPAT_ANCHOR, DXVK_COMPAT_CODE)
+
 print(f"patch_mesa: {changes} edits applied, {len(misses)} anchors missing")
 for m in misses:
     print("  MISS:", m)
