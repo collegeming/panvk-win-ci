@@ -143,6 +143,8 @@ jobs:
           Copy-Item src\win32_stubs.c mesa\src\panfrost\lib\kmod\ -Force
           python tools\patch_mesa.py mesa
           if ($LASTEXITCODE) { throw 'patch_mesa.py failed' }
+          python tools\diag.py mesa
+          if ($LASTEXITCODE) { throw 'diag.py failed' }
       - name: Configure
         shell: pwsh
         run: |
@@ -152,7 +154,6 @@ jobs:
           & $env:CC --version
           meson setup build mesa --backend=ninja `
             -Dbuildtype=debugoptimized `
-            -Db_vscrt=mt `
             -Dplatforms=windows `
             -Dvulkan-drivers=panfrost `
             '-Dgallium-drivers=' `
