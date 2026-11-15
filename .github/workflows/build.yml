@@ -174,6 +174,19 @@ jobs:
           Select-String -Path build.log -Pattern ' error C| error LNK|fatal error| error:' | Select-Object -First 80 | ForEach-Object { $_.Line }
           if ($fail.Count -gt 0) { throw 'build failed' }
           Get-ChildItem build -Recurse -Filter '*vulkan_manet*' | Select-Object FullName
+      - name: Build and smoke-run loader-free enum harness
+        shell: pwsh
+        run: |
+          $clang = Join-Path $env:VCINSTALLDIR 'Tools\Llvm\ARM64\bin\clang-cl.exe'
+          & $clang /nologo /std:c11 /O2 /I mesa\include tools\vk_enum.c /Fe:vk_enum.exe
+          if ($LASTEXITCODE) { throw 'vk_enum build failed' }
+          $dll = (Get-ChildItem build -Recurse -Filter vulkan_manet.dll | Select-Object -First 1).FullName
+          # The runner has no virtio WDDM adapter: the expected result is a
+          # clean vkCreateInstance and zero/incompatible physical devices.
+          # Capture the run, but never fail packaging on it.
+          & .\vk_enum.exe $dll 2>&1 | Tee-Object vk_enum.out
+          Write-Host "vk_enum exit code: $LASTEXITCODE"
+          exit 0
       - name: Package ARM64 ICD artifact
         shell: pwsh
         run: |
@@ -183,6 +196,8 @@ jobs:
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item $dll out\vulkan_manet.dll
           Copy-Item $dll out\vulkan_virtio.dll
+          Copy-Item .\vk_enum.exe out\vk_enum.exe
+          Copy-Item .\vk_enum.out out\vk_enum.out
           if ($icd) { Copy-Item $icd out\manet_icd.json }
           '{"file_format_version":"1.0.1","ICD":{"library_path":"./vulkan_virtio.dll","api_version":"1.4.363"}}' |
             Set-Content -Encoding ascii out\vulkan_virtio_icd.json

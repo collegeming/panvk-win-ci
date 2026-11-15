@@ -265,6 +265,8 @@ sub("src/panfrost/vulkan/panvk_instance.c",
     "      panvk_physical_device_init_kbase(device, instance, \"wddm\");\n"
     "   if (result != VK_SUCCESS) {\n"
     "      vk_free(&instance->vk.alloc, device);\n"
+    "      if (result == VK_ERROR_INCOMPATIBLE_DRIVER)\n"
+    "         return VK_SUCCESS; /* no virtio WDDM adapter: zero devices */\n"
     "      return result;\n"
     "   }\n"
     "   list_addtail(&device->vk.link, &vk_instance->physical_devices.list);\n"
