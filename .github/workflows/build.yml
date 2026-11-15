@@ -114,7 +114,12 @@ jobs:
           Copy-Item vendor\mesa-overlay\panvk_win_rt_stubs.c mesa\src\panfrost\vulkan\panvk_win_rt_stubs.c
           Copy-Item vendor\mesa-overlay\vulkan_manet.def mesa\src\panfrost\vulkan\vulkan_manet.def
           Copy-Item vendor\win32-compat\malikm_ioctl.h, vendor\win32-compat\maliwddm_abi.h mesa\include\win32-compat\
-          $patches = @('0003','0004','0005','0006','0007','0008','0009','0010','0011','0016','0053','0055','0061')
+          # 0003/0004/0006/0007/0011/0016/0025/0055 are rebased into
+          # tools/patch_mesa.py with string anchors; a missing anchor fails
+          # that step.  Everything still applied here is essential too:
+          # there is no silent skip.
+          $patches = @('0005','0008','0009','0010','0053','0061')
+          $skipped = @()
           foreach ($n in $patches) {
             $p = Get-ChildItem vendor\mesa-patches -Filter "$n-*.patch" | Select-Object -First 1
             if (-not $p) { throw "missing patch $n" }
@@ -124,14 +129,18 @@ jobs:
               --include='include/*' --include='meson.build' --include='src/meson.build' `
               $p.FullName
             if ($LASTEXITCODE) {
-              Write-Host "WARNING: patch did not apply (manet 26.3 drift), skipping: $($p.Name)"
-              continue
+              throw "essential patch did not apply (manet drift): $($p.Name)"
             }
             git -C mesa apply --whitespace=nowarn `
               --include='src/panfrost/*' --include='src/util/*' --include='src/compiler/*' `
               --include='include/*' --include='meson.build' --include='src/meson.build' `
               $p.FullName
-            if ($LASTEXITCODE) { throw "patch failed after check: $($p.Name)" }
+            if ($LASTEXITCODE) { throw "essential patch failed after check: $($p.Name)" }
+          }
+          if ($skipped.Count -gt 0) {
+            Write-Host "non-essential patches skipped: $($skipped -join ', ')"
+          } else {
+            Write-Host "non-essential patches skipped: none"
           }
           Copy-Item libpan\* mesa\src\panfrost\libpan\ -Force
           Copy-Item vendor\libpan-prebuilt.meson.build mesa\src\panfrost\libpan\meson.build -Force
@@ -163,8 +172,8 @@ jobs:
             '-Dvideo-codecs=' -Dmicrosoft-clc=disabled -Dspirv-to-dxil=false `
             -Dzstd=disabled -Dshader-cache=disabled -Dbuild-tests=false `
             -Dpanfrost-kmds=kbase `
-            '-Dc_args=-DHAVE_FUNC_ATTRIBUTE_PACKED' `
-            '-Dcpp_args=-DHAVE_FUNC_ATTRIBUTE_PACKED'
+            '-Dc_args=-DHAVE_FUNC_ATTRIBUTE_PACKED -D_wassert=mali_wassert' `
+            '-Dcpp_args=-DHAVE_FUNC_ATTRIBUTE_PACKED -D_wassert=mali_wassert'
           if ($LASTEXITCODE) { if (Test-Path build\meson-logs\meson-log.txt) { Get-Content build\meson-logs\meson-log.txt -Tail 100 }; throw 'meson setup failed' }
       - name: Build
         shell: pwsh

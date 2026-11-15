@@ -48,6 +48,39 @@ def wrap(rel, start_marker, end_marker, before):
     return True
 
 
+def create(rel, content):
+    """Create a file that must not exist yet.  A different existing file is a
+    hard miss: it means the Mesa branch grew its own version and the patch
+    below needs review instead of being silently shadowed."""
+    global changes
+    p = root / rel
+    if p.exists():
+        old = p.read_text(encoding="utf-8", errors="surrogateescape")
+        if old == content:
+            return True
+        misses.append(f"{rel}: exists with unexpected content")
+        return False
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8", errors="surrogateescape")
+    changes += 1
+    return True
+
+
+def require(rel, needle, why):
+    """Assert a property that the Mesa branch is expected to provide already.
+    Used for hunks that are upstream now: if the property disappears, fail
+    the build instead of silently losing the fix."""
+    p = root / rel
+    if not p.exists():
+        misses.append(f"{rel}: file missing")
+        return False
+    s = p.read_text(encoding="utf-8", errors="surrogateescape")
+    if needle not in s:
+        misses.append(f"{rel}: required property missing ({why}): {needle[:70]!r}")
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------
 # Windows header shadow tree (POSIX/libdrm stand-ins).
 # --------------------------------------------------------------------------
@@ -208,6 +241,531 @@ sub("src/util/os_mman.h",
 sub("src/panfrost/lib/kmod/pan_kmod.h",
     "#include <unistd.h>\n#include <xf86drm.h>",
     "#include <unistd.h>\n#include <sys/mman.h>\n#include <xf86drm.h>")
+
+# --------------------------------------------------------------------------
+# Panfrost MSVC ABI correctness: rebase of 0003/0011/0016 (and the parts of
+# 0007 that still apply).  The manet 26.3 tree already has the public bool
+# bitfields as unsigned, but its enum bitfields and packed instruction
+# structures are unchanged.  Under the MSVC ABI an enum bitfield is signed,
+# so a 3-bit enum bi_size reads BI_SIZE_64 (5) back as -3, and valhall's
+# va_size/va_unit tables are misread; shader compilation then asserts and
+# aborts inside vkCreateComputePipelines.  Enum bitfields are made unsigned,
+# and the packed hardware structures are serialized by explicit helpers
+# instead of trusting the compiler's bitfield layout.
+# --------------------------------------------------------------------------
+
+# 0003 + 0011: bifrost.h
+bifrost_h = "src/panfrost/compiler/bifrost/bifrost.h"
+
+sub(bifrost_h,
+    "#include <stdint.h>\n#include <string.h>\n",
+    "#include <stdint.h>\n#include <string.h>\n\n#include \"util/macros.h\"\n")
+
+sub(bifrost_h,
+    "   enum bifrost_ftz flush_to_zero : 2;",
+    "   unsigned flush_to_zero : 2; /* enum bifrost_ftz */")
+sub(bifrost_h,
+    "   enum bifrost_exceptions float_exceptions : 2;",
+    "   unsigned float_exceptions : 2; /* enum bifrost_exceptions */")
+sub(bifrost_h,
+    "   enum bifrost_flow flow_control : 3;",
+    "   unsigned flow_control : 3; /* enum bifrost_flow */")
+
+header_old = (
+    "   enum bifrost_message_type message_type      : 5;\n"
+    "   enum bifrost_message_type next_message_type : 5;\n"
+    "} __attribute__((packed));")
+header_new = (
+    "   unsigned message_type      : 5; /* enum bifrost_message_type */\n"
+    "   unsigned next_message_type : 5; /* enum bifrost_message_type */\n"
+    "} PACKED;\n\n"
+    "/* Packs struct bifrost_header in GCC's packed, LSB-first bitfield layout,\n"
+    " * which is the hardware encoding. MSVC lays mixed-type bitfields out\n"
+    " * differently, so the encoding must not depend on the struct's layout. */\n"
+    "static inline uint64_t\n"
+    "bifrost_header_pack(const struct bifrost_header *f)\n"
+    "{\n"
+    "   uint64_t v = 0;\n"
+    "   v |= ((uint64_t)f->zero1 & 0x1full) << 0;\n"
+    "   v |= ((uint64_t)f->flush_to_zero & 0x3ull) << 5;\n"
+    "   v |= ((uint64_t)f->suppress_inf & 0x1ull) << 7;\n"
+    "   v |= ((uint64_t)f->suppress_nan & 0x1ull) << 8;\n"
+    "   v |= ((uint64_t)f->float_exceptions & 0x3ull) << 9;\n"
+    "   v |= ((uint64_t)f->flow_control & 0x7ull) << 11;\n"
+    "   v |= ((uint64_t)f->zero2 & 0x1ull) << 14;\n"
+    "   v |= ((uint64_t)f->terminate_discarded_threads & 0x1ull) << 15;\n"
+    "   v |= ((uint64_t)f->next_clause_prefetch & 0x1ull) << 16;\n"
+    "   v |= ((uint64_t)f->staging_barrier & 0x1ull) << 17;\n"
+    "   v |= ((uint64_t)f->staging_register & 0x3full) << 18;\n"
+    "   v |= ((uint64_t)f->dependency_wait & 0xffull) << 24;\n"
+    "   v |= ((uint64_t)f->dependency_slot & 0x7ull) << 32;\n"
+    "   v |= ((uint64_t)f->message_type & 0x1full) << 35;\n"
+    "   v |= ((uint64_t)f->next_message_type & 0x1full) << 40;\n"
+    "   return v;\n"
+    "}")
+sub(bifrost_h, header_old, header_new)
+
+sub(bifrost_h,
+    "struct bifrost_fma_inst {\n"
+    "   unsigned src0 : 3;\n"
+    "   unsigned op   : 20;\n"
+    "} __attribute__((packed));",
+    "struct bifrost_fma_inst {\n"
+    "   unsigned src0 : 3;\n"
+    "   unsigned op   : 20;\n"
+    "} PACKED;")
+sub(bifrost_h,
+    "struct bifrost_add_inst {\n"
+    "   unsigned src0 : 3;\n"
+    "   unsigned op   : 17;\n"
+    "} __attribute__((packed));",
+    "struct bifrost_add_inst {\n"
+    "   unsigned src0 : 3;\n"
+    "   unsigned op   : 17;\n"
+    "} PACKED;")
+
+regs_old = (
+    "struct bifrost_regs {\n"
+    "   unsigned fau_idx : 8;\n"
+    "   unsigned reg3    : 6;\n"
+    "   unsigned reg2    : 6;\n"
+    "   unsigned reg0    : 5;\n"
+    "   unsigned reg1    : 6;\n"
+    "   unsigned ctrl    : 4;\n"
+    "} __attribute__((packed));")
+regs_new = (
+    "struct bifrost_regs {\n"
+    "   unsigned fau_idx : 8;\n"
+    "   unsigned reg3    : 6;\n"
+    "   unsigned reg2    : 6;\n"
+    "   unsigned reg0    : 5;\n"
+    "   unsigned reg1    : 6;\n"
+    "   unsigned ctrl    : 4;\n"
+    "} PACKED;\n\n"
+    "/* Packs struct bifrost_regs in GCC's packed, LSB-first bitfield layout,\n"
+    " * which is the hardware encoding. MSVC lays mixed-type bitfields out\n"
+    " * differently, so the encoding must not depend on the struct's layout. */\n"
+    "static inline uint64_t\n"
+    "bifrost_regs_pack(const struct bifrost_regs *f)\n"
+    "{\n"
+    "   uint64_t v = 0;\n"
+    "   v |= ((uint64_t)f->fau_idx & 0xffull) << 0;\n"
+    "   v |= ((uint64_t)f->reg3 & 0x3full) << 8;\n"
+    "   v |= ((uint64_t)f->reg2 & 0x3full) << 14;\n"
+    "   v |= ((uint64_t)f->reg0 & 0x1full) << 20;\n"
+    "   v |= ((uint64_t)f->reg1 & 0x3full) << 25;\n"
+    "   v |= ((uint64_t)f->ctrl & 0xfull) << 31;\n"
+    "   return v;\n"
+    "}")
+sub(bifrost_h, regs_old, regs_new)
+
+fmt_old = (
+    "struct bifrost_fmt_constant {\n"
+    "   unsigned pos   : 4;\n"
+    "   unsigned tag   : 4;\n"
+    "   uint64_t imm_1 : 60;\n"
+    "   uint64_t imm_2 : 60;\n"
+    "} __attribute__((packed));")
+fmt_new = (
+    "struct bifrost_fmt_constant {\n"
+    "   unsigned pos   : 4;\n"
+    "   unsigned tag   : 4;\n"
+    "   uint64_t imm_1 : 60;\n"
+    "   uint64_t imm_2 : 60;\n"
+    "} PACKED;\n\n"
+    "/* Packs struct bifrost_fmt_constant (128 bits: pos 4, tag 4, imm_1 60,\n"
+    " * imm_2 60) in GCC's packed bitfield layout; imm_1 straddles bit 64. */\n"
+    "static inline void\n"
+    "bifrost_fmt_constant_pack(const struct bifrost_fmt_constant *f,\n"
+    "                          uint64_t out[2])\n"
+    "{\n"
+    "   uint64_t imm_1 = f->imm_1 & ((1ull << 60) - 1);\n"
+    "   uint64_t imm_2 = f->imm_2 & ((1ull << 60) - 1);\n\n"
+    "   out[0] = (f->pos & 0xfull) | ((f->tag & 0xfull) << 4) |\n"
+    "            (imm_1 << 8);\n"
+    "   out[1] = (imm_1 >> 56) | (imm_2 << 4);\n"
+    "}")
+sub(bifrost_h, fmt_old, fmt_new)
+
+sub(bifrost_h,
+    "         enum bifrost_tex_op op         : 3;",
+    "         unsigned op         : 3; /* enum bifrost_tex_op */")
+sub(bifrost_h,
+    "         enum bifrost_texture_format_full format : 4;",
+    "         unsigned format : 4; /* enum bifrost_texture_format_full */")
+
+tex_tail_old = (
+    "         /* Write mask for the result */\n"
+    "         unsigned mask : 4;\n"
+    "      };\n\n"
+    "      uint32_t packed;\n"
+    "   };\n"
+    "} __attribute__((packed));\n\n"
+    "struct bifrost_dual_texture_operation {")
+tex_tail_new = (
+    "         /* Write mask for the result */\n"
+    "         unsigned mask : 4;\n"
+    "      };\n\n"
+    "      uint32_t packed;\n"
+    "   };\n"
+    "} PACKED;\n\n"
+    "/* Packs struct bifrost_texture_operation in GCC's packed, LSB-first\n"
+    " * bitfield layout, which is the hardware encoding. MSVC lays mixed-type\n"
+    " * bitfields out differently, so the encoding must not depend on the\n"
+    " * struct's layout. */\n"
+    "static inline uint32_t\n"
+    "bifrost_texture_operation_pack(\n"
+    "   const struct bifrost_texture_operation *f)\n"
+    "{\n"
+    "   uint64_t v = 0;\n"
+    "   v |= ((uint64_t)f->sampler_index_or_mode & 0xfull) << 0;\n"
+    "   v |= ((uint64_t)f->index & 0x7full) << 4;\n"
+    "   v |= ((uint64_t)f->immediate_indices & 0x1ull) << 11;\n"
+    "   v |= ((uint64_t)f->op & 0x7ull) << 12;\n"
+    "   v |= ((uint64_t)f->offset_or_bias_disable & 0x1ull) << 15;\n"
+    "   v |= ((uint64_t)f->shadow_or_clamp_disable & 0x1ull) << 16;\n"
+    "   v |= ((uint64_t)f->array & 0x1ull) << 17;\n"
+    "   v |= ((uint64_t)f->dimension & 0x3ull) << 18;\n"
+    "   v |= ((uint64_t)f->lod_or_fetch & 0x7ull) << 20;\n"
+    "   v |= ((uint64_t)f->zero & 0x1ull) << 23;\n"
+    "   v |= ((uint64_t)f->format & 0xfull) << 24;\n"
+    "   v |= ((uint64_t)f->mask & 0xfull) << 28;\n"
+    "   return (uint32_t)v;\n"
+    "}\n\n"
+    "struct bifrost_dual_texture_operation {")
+sub(bifrost_h, tex_tail_old, tex_tail_new)
+
+dual_old = (
+    "   /* Format/mask for each texture */\n"
+    "   enum bifrost_texture_format secondary_format : 3;\n"
+    "   unsigned secondary_mask                      : 4;\n\n"
+    "   enum bifrost_texture_format primary_format : 3;\n"
+    "   unsigned primary_mask                      : 4;\n"
+    "} __attribute__((packed));\n\n"
+    "static inline uint32_t\n"
+    "bi_dual_tex_as_u32(struct bifrost_dual_texture_operation desc)\n"
+    "{\n"
+    "   uint32_t desc_u;\n"
+    "   memcpy(&desc_u, &desc, sizeof(desc));\n\n"
+    "   return desc_u;\n"
+    "}")
+dual_new = (
+    "   /* Format/mask for each texture */\n"
+    "   unsigned secondary_format : 3; /* enum bifrost_texture_format */\n"
+    "   unsigned secondary_mask                      : 4;\n\n"
+    "   unsigned primary_format : 3; /* enum bifrost_texture_format */\n"
+    "   unsigned primary_mask                      : 4;\n"
+    "} PACKED;\n\n"
+    "/* Packs struct bifrost_dual_texture_operation in GCC's packed, LSB-first\n"
+    " * bitfield layout, which is the hardware encoding. */\n"
+    "static inline uint32_t\n"
+    "bifrost_dual_texture_operation_pack(\n"
+    "   const struct bifrost_dual_texture_operation *f)\n"
+    "{\n"
+    "   uint64_t v = 0;\n"
+    "   v |= ((uint64_t)f->primary_sampler_index & 0x3ull) << 0;\n"
+    "   v |= ((uint64_t)f->mode & 0x3ull) << 2;\n"
+    "   v |= ((uint64_t)f->primary_texture_index & 0x3ull) << 4;\n"
+    "   v |= ((uint64_t)f->secondary_sampler_index & 0x3ull) << 6;\n"
+    "   v |= ((uint64_t)f->secondary_texture_index & 0x3ull) << 8;\n"
+    "   v |= ((uint64_t)f->reserved & 0x1ull) << 10;\n"
+    "   v |= ((uint64_t)f->index_mode_zero & 0x1ull) << 11;\n"
+    "   v |= ((uint64_t)f->secondary_register & 0x3full) << 12;\n"
+    "   v |= ((uint64_t)f->secondary_format & 0x7ull) << 18;\n"
+    "   v |= ((uint64_t)f->secondary_mask & 0xfull) << 21;\n"
+    "   v |= ((uint64_t)f->primary_format & 0x7ull) << 25;\n"
+    "   v |= ((uint64_t)f->primary_mask & 0xfull) << 28;\n"
+    "   return (uint32_t)v;\n"
+    "}\n\n"
+    "static inline uint32_t\n"
+    "bi_dual_tex_as_u32(struct bifrost_dual_texture_operation desc)\n"
+    "{\n"
+    "   return bifrost_dual_texture_operation_pack(&desc);\n"
+    "}")
+sub(bifrost_h, dual_old, dual_new)
+
+sub(bifrost_h,
+    "struct bifrost_pixel_indices {\n"
+    "   unsigned sample : 8;\n"
+    "   unsigned rt     : 8;\n"
+    "   unsigned x      : 8;\n"
+    "   unsigned y      : 8;\n"
+    "} __attribute__((packed));",
+    "struct bifrost_pixel_indices {\n"
+    "   unsigned sample : 8;\n"
+    "   unsigned rt     : 8;\n"
+    "   unsigned x      : 8;\n"
+    "   unsigned y      : 8;\n"
+    "} PACKED;")
+
+# 0003: use the explicit packers instead of copying the compiler's layout.
+bi_pack_c = "src/panfrost/compiler/bifrost/bifrost/bi_pack.c"
+sub(bi_pack_c,
+    "   uint64_t u = 0;\n"
+    "   memcpy(&u, &header, sizeof(header));\n"
+    "   return u;",
+    "   return bifrost_header_pack(&header);")
+sub(bi_pack_c,
+    "   memcpy(&packed, &s, sizeof(s));\n"
+    "   return packed;",
+    "   packed = bifrost_regs_pack(&s);\n"
+    "   return packed;")
+sub(bi_pack_c,
+    "   util_dynarray_append(emission, quad);",
+    "   uint64_t words[2];\n"
+    "   bifrost_fmt_constant_pack(&quad, words);\n"
+    "   util_dynarray_append(emission, words[0]);\n"
+    "   util_dynarray_append(emission, words[1]);")
+
+# 0003: texture descriptors are packed explicitly, not through .packed.
+sub("src/panfrost/compiler/pan_nir_lower_tex.c",
+    "nir_imm_int(b, desc.packed)",
+    "nir_imm_int(b, bifrost_texture_operation_pack(&desc))",
+    count=3)
+
+# 0003/0007: statement expressions are a GCC extension; MSVC has none.
+pan_nir_h = "src/panfrost/compiler/pan_nir.h"
+sub(pan_nir_h,
+    "#define PAN_AS_U32(x) ({\\\n"
+    "   static_assert(sizeof(x) == 4, \"x must be 4 bytes\"); \\\n"
+    "   uint32_t _u; \\\n"
+    "   memcpy(&_u, &(x), 4); \\\n"
+    "   _u; \\\n"
+    "})",
+    "/* Not a statement expression: MSVC has none. */\n"
+    "static inline uint32_t\n"
+    "pan_as_u32(const void *p, size_t size)\n"
+    "{\n"
+    "   uint32_t u;\n"
+    "   assert(size == 4);\n"
+    "   memcpy(&u, p, 4);\n"
+    "   return u;\n"
+    "}\n"
+    "#define PAN_AS_U32(x) pan_as_u32(&(x), sizeof(x))")
+
+# 0011: the Valhall source/opcode tables must read their enums unsigned.
+valhall_h = "src/panfrost/compiler/bifrost/valhall/valhall.h"
+sub(valhall_h,
+    "   enum va_size size : 2;\n"
+    "} __attribute__((packed));",
+    "   unsigned size : 2; /* enum va_size */\n"
+    "} PACKED;")
+sub(valhall_h,
+    "   enum va_unit unit         : 3;",
+    "   unsigned unit : 3; /* enum va_unit */")
+
+# 0011: the opcode metadata table is generated from this template.
+sub("src/panfrost/compiler/bifrost/bi_opcodes.h.py",
+    "        enum bifrost_message_type message : 4;\n"
+    "        enum bi_size size : 3;\n"
+    "        enum bi_sr_count sr_count : 3;",
+    "        unsigned message : 4; /* enum bifrost_message_type */\n"
+    "        unsigned size : 3; /* enum bi_size */\n"
+    "        unsigned sr_count : 3; /* enum bi_sr_count */")
+
+# 0011 + 0016: enum bitfields in the Gallium preload keys.  Not used by the
+# v15 PanVK path, but the same MSVC ABI rule applies when D3D10 builds it.
+pan_fb = "src/gallium/drivers/panfrost/pan_fb_preload.c"
+sub(pan_fb,
+    "   gl_frag_result loc              : 4;\n"
+    "   nir_alu_type type               : 8;\n"
+    "   enum mali_texture_dimension dim : 3;",
+    "   unsigned loc                    : 4; /* gl_frag_result */\n"
+    "   unsigned type                   : 8; /* nir_alu_type */\n"
+    "   unsigned dim : 3; /* enum mali_texture_dimension */")
+sub(pan_fb,
+    "      nir_alu_type type               : 8;\n"
+    "      unsigned samples                : 5;\n"
+    "      enum mali_texture_dimension dim : 3;",
+    "      unsigned type                   : 8; /* nir_alu_type */\n"
+    "      unsigned samples                : 5;\n"
+    "      unsigned dim : 3; /* enum mali_texture_dimension */")
+
+# 0011: blend/equation keys (Gallium panfrost; kept consistent with 0003).
+sub("src/panfrost/lib/pan_blend.h",
+    "   enum pipe_blend_func rgb_func          : 3;\n"
+    "   enum pipe_blendfactor rgb_src_factor   : 5;\n"
+    "   enum pipe_blendfactor rgb_dst_factor   : 5;\n"
+    "   enum pipe_blend_func alpha_func        : 3;\n"
+    "   enum pipe_blendfactor alpha_src_factor : 5;\n"
+    "   enum pipe_blendfactor alpha_dst_factor : 5;",
+    "   unsigned rgb_func          : 3; /* enum pipe_blend_func */\n"
+    "   unsigned rgb_src_factor   : 5; /* enum pipe_blendfactor */\n"
+    "   unsigned rgb_dst_factor   : 5; /* enum pipe_blendfactor */\n"
+    "   unsigned alpha_func        : 3; /* enum pipe_blend_func */\n"
+    "   unsigned alpha_src_factor : 5; /* enum pipe_blendfactor */\n"
+    "   unsigned alpha_dst_factor : 5; /* enum pipe_blendfactor */")
+
+# 0011: Midgard is not built for the v15 Windows target, but the ABI rule is
+# the same and the source is shared with the other Panfrost builds.
+midgard_h = "src/panfrost/compiler/midgard/midgard.h"
+sub(midgard_h,
+    "   enum midgard_call_mode call_mode : 2;",
+    "   unsigned call_mode : 2; /* enum midgard_call_mode */",
+    count=2)
+sub(midgard_h,
+    "   enum mali_texture_op op             : 4;",
+    "   unsigned op             : 4; /* enum mali_texture_op */")
+sub(midgard_h,
+    "   enum midgard_partial_execution exec : 2;",
+    "   unsigned exec : 2; /* enum midgard_partial_execution */")
+sub(midgard_h,
+    "   enum mali_sampler_type sampler_type : 2;",
+    "   unsigned sampler_type : 2; /* enum mali_sampler_type */")
+
+# 0007: bi_index is hashed as 64 bits; build the key by fields so it does not
+# depend on how MSVC packs the bitfield runs.
+# 0007's bi_dump_shader PATH_MAX hunk is not applicable to manet 26.3: the
+# dump helper moved to bifrost_nir.c and uses asprintf, so there is no
+# PATH_MAX-sized stack buffer to fix.
+sub("src/panfrost/compiler/bifrost/bifrost_compile.c",
+    "   static_assert(sizeof(idx) <= sizeof(uint64_t), \"too much padding\");\n\n"
+    "   uint64_t key = 0;\n"
+    "   memcpy(&key, &idx, sizeof(idx));\n"
+    "   return key;",
+    "   /* Built field by field rather than by copying the struct: under the\n"
+    "    * MSVC ABI each bool bitfield run takes its own storage unit, so a\n"
+    "    * copy of the first 8 bytes could drop fields. */\n"
+    "   uint64_t key = idx.value;\n"
+    "   key |= (uint64_t)idx.abs << 32;\n"
+    "   key |= (uint64_t)idx.neg << 33;\n"
+    "   key |= (uint64_t)idx.discard << 34;\n"
+    "   key |= (uint64_t)(idx.swizzle & 0x1f) << 35;\n"
+    "   key |= (uint64_t)(idx.offset & 0x7) << 40;\n"
+    "   key |= (uint64_t)(idx.type & 0x7) << 43;\n"
+    "   key |= (uint64_t)idx.kill_ssa << 46;\n"
+    "   key |= (uint64_t)idx.memory << 47;\n"
+    "   return key;")
+
+# 0003: sample tables are hardware-packed.
+sub("src/panfrost/lib/pan_samples.c",
+    "#include \"pan_samples.h\"\n",
+    "#include \"pan_samples.h\"\n#include \"util/macros.h\"\n")
+sub("src/panfrost/lib/pan_samples.c",
+    "} __attribute__((packed));",
+    "} PACKED;",
+    count=2)
+
+# 0003: mem->addr is void *, so do the byte arithmetic explicitly.
+sub("src/panfrost/genxml/decode.h",
+    "   return mem->addr + gpu_va - mem->gpu_va;",
+    "   return (uint8_t *)mem->addr + (gpu_va - mem->gpu_va);")
+
+# --------------------------------------------------------------------------
+# Properties that manet 26.3 already provides.  Assert them so a future
+# branch update cannot silently drop the MSVC fix these patches encode.
+# (0004 bool bitfields and 0016/0001 location/section bitfields are upstream.)
+# --------------------------------------------------------------------------
+require("src/panfrost/compiler/bifrost/compiler.h",
+        "   unsigned swizzle : 5;\n"
+        "   uint32_t offset         : 3;\n"
+        "   unsigned type : 3;",
+        "bi_index enum bitfields must stay unsigned")
+require("src/panfrost/compiler/pan_compiler.h",
+        "   unsigned location : 7;",
+        "pan_varying_slot location must stay unsigned")
+require("src/panfrost/compiler/pan_compiler.h",
+        "   unsigned section : 2;",
+        "pan_varying_slot section must stay unsigned")
+require("src/panfrost/compiler/pan_compiler.h",
+        "   uint8_t known;",
+        "pan_varying_layout must not use an enum bitfield (0006)")
+require(pan_nir_h,
+        "struct pan_bi_tex_flags {\n"
+        "   unsigned skip : 1;\n"
+        "   unsigned explicit_lod : 1;",
+        "0004 bool bitfields must stay unsigned")
+require(pan_nir_h,
+        "struct pan_va_tex_flags {\n"
+        "   unsigned skip : 1;",
+        "0004 bool bitfields must stay unsigned")
+
+# --------------------------------------------------------------------------
+# 0025 + 0055: route assert() through a file logger when the build passes
+# -D_wassert=mali_wassert.  The UCRT version raises a message box (or, in a
+# windowless process, aborts); the Mesa assert text is what the shader
+# compiler diagnostics need.
+# --------------------------------------------------------------------------
+create("src/util/mali_wassert.c", r'''/*
+ * Assertions, without the message box. Windows only.
+ *
+ * The Windows build passes -D_wassert=mali_wassert, so every assert()
+ * calls this instead of the C runtime.  This writes the assertion to
+ * C:\mali\log\<exe>-<pid>-assert.txt (when that directory exists), to
+ * stderr and to the debugger, and returns, which is what Ignore does.
+ */
+#ifdef _WIN32
+
+#include <windows.h>
+#include <stdio.h>
+
+static void __cdecl
+mali_wassert_impl(const wchar_t *message, const wchar_t *file, unsigned line)
+{
+   static volatile LONG count = 0;
+   static HANDLE log = NULL;
+   char buf[1024];
+   int len;
+   DWORD done;
+
+   if (InterlockedIncrement(&count) > 2000)
+      return;
+   len = snprintf(buf, sizeof buf, "%10lu %5lu ASSERT %ls:%u: %ls\n",
+                  (unsigned long)GetTickCount(), (unsigned long)GetCurrentThreadId(),
+                  file, line, message);
+   if (len <= 0)
+      return;
+   if (len >= (int)sizeof buf)
+      len = (int)sizeof buf - 1;
+   OutputDebugStringA(buf);
+   fputs(buf, stderr);
+
+   if (log == NULL) {
+      HANDLE h = INVALID_HANDLE_VALUE;
+      if (GetFileAttributesA("C:\\mali\\log") != INVALID_FILE_ATTRIBUTES) {
+         char exe[MAX_PATH], path[MAX_PATH];
+         const char *base = exe;
+         DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);
+         exe[n < sizeof exe ? n : sizeof exe - 1] = 0;
+         for (const char *c = exe; *c; c++)
+            if (*c == '\\' || *c == '/')
+               base = c + 1;
+         snprintf(path, sizeof path, "C:\\mali\\log\\%s-%lu-assert.txt", base,
+                  (unsigned long)GetCurrentProcessId());
+         h = CreateFileA(path, FILE_APPEND_DATA,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+      }
+      if (InterlockedCompareExchangePointer((PVOID volatile *)&log, h, NULL) != NULL &&
+          h != INVALID_HANDLE_VALUE)
+         CloseHandle(h);
+   }
+   if (log != INVALID_HANDLE_VALUE)
+      WriteFile(log, buf, (DWORD)len, &done, NULL);
+}
+
+/* What "__declspec(dllimport) mali_wassert" resolves to. */
+void (__cdecl *__imp_mali_wassert)(const wchar_t *, const wchar_t *, unsigned) = mali_wassert_impl;
+
+#ifndef _DLL
+/* With the static C runtime (/MT) assert.h does not declare _wassert
+ * dllimport: the calls name the function itself, so define it. */
+void __cdecl
+mali_wassert(const wchar_t *message, const wchar_t *file, unsigned line)
+{
+   mali_wassert_impl(message, file, line);
+}
+#endif
+
+#endif
+''')
+
+sub("src/util/meson.build",
+    "  'u_debug.c',\n"
+    "  'u_debug.h',",
+    "  'u_debug.c',\n"
+    "  'mali_wassert.c',\n"
+    "  'u_debug.h',")
 
 # --------------------------------------------------------------------------
 # kmod build: use the vdrm transport instead of the Linux virtgpu ioctls.
