@@ -10,7 +10,7 @@ capset6 `KBAS`、props 781 B、CSIF 24 B、两轮 connect/teardown PASS。
 
 ## 当前状态（2026-11-15）
 
-- GitHub Actions run `43730976085`（`mesa-panvk-win32`）成功。
+- GitHub Actions run `43732284937`（`mesa-panvk-win32`）成功。
 - Artifact `mesa-panvk-win32` 内容：
 
 | 文件 | 说明 |
@@ -29,13 +29,13 @@ capset6 `KBAS`、props 781 B、CSIF 24 B、两轮 connect/teardown PASS。
 `vulkan_virtio.dll` SHA256：
 
 ```
-6468038C8D43C05C7101A042B3B11A3E43790F7D82BDC53F8B6ABC9641878C15
+1028AC776E9789253759E84C09D08C82CC2BE33891E03DAF87121B8181FAEE7F
 ```
 
 `vcruntime140.dll` SHA256：
 
 ```
-C600AFF0ED497AE5C0E4E5CC515B31E0C694F01E893B1B1038441235A037F7F3
+3C56F4167E2B3D8E6338497731E6AAE8CD7EC46BD6789F9423A8D9CF9A630310
 ```
 
 runner 上的 loader-free 冒烟结果（无 virtio 适配器，因此 0 设备）：
