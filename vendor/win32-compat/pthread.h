@@ -16,6 +16,32 @@ static inline int pthread_mutex_lock(pthread_mutex_t *m) { simple_mtx_lock(m); r
 static inline int pthread_mutex_unlock(pthread_mutex_t *m) { simple_mtx_unlock(m); return 0; }
 static inline int pthread_mutex_destroy(pthread_mutex_t *m) { simple_mtx_destroy(m); return 0; }
 
+/* PanVK's kbase sync-export helper creates one detached thread.  The
+ * vdrm/kbase path does not use it, but the code must compile and link. */
+typedef HANDLE pthread_t;
+typedef void *(*pthread_func)(void *);
+static inline int pthread_create(pthread_t *thread, const void *attr,
+                                 pthread_func start_routine, void *arg)
+{
+   (void)attr;
+   *thread = CreateThread(NULL, 0,
+                          (LPTHREAD_START_ROUTINE)(void *)start_routine,
+                          arg, 0, NULL);
+   return *thread ? 0 : -1;
+}
+static inline int pthread_detach(pthread_t thread)
+{
+   CloseHandle(thread);
+   return 0;
+}
+static inline int pthread_join(pthread_t thread, void **retval)
+{
+   (void)retval;
+   WaitForSingleObject(thread, INFINITE);
+   CloseHandle(thread);
+   return 0;
+}
+
 /* panfrost_kmod.c raises its event thread to SCHED_FIFO; on Windows that
  * thread is replaced in M3, so the request simply fails. */
 #include <errno.h>
