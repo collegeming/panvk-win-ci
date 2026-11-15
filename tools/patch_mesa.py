@@ -325,6 +325,11 @@ sub("src/panfrost/lib/kmod/kbase_kmod.c",
     "#include <fcntl.h>",
     "#include <fcntl.h>\n#ifdef _WIN32\n#include <io.h>\n#endif")
 sub("src/panfrost/lib/kmod/kbase_kmod.c",
+    "fcntl(fd, F_DUPFD_CLOEXEC, 3)", "_dup(fd)")
+sub("src/panfrost/lib/kmod/kbase_kmod.c",
+    "fcntl(kbase_bo->dmabuf_fd, F_DUPFD_CLOEXEC, 3)",
+    "_dup(kbase_bo->dmabuf_fd)")
+sub("src/panfrost/lib/kmod/kbase_kmod.c",
     "fcntl(fd, F_DUPFD_CLOEXEC, 0)", "_dup(fd)")
 
 print(f"patch_mesa: {changes} edits applied, {len(misses)} anchors missing")
