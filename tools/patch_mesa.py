@@ -364,6 +364,97 @@ wrap("src/panfrost/vulkan/panvk_physical_device.c",
      "#if defined(HAVE_PAN_KMOD_KBASE)",
      "#ifndef _WIN32\n")
 
+# Logical device: it re-opens the kbase node for a fresh context; on Windows
+# use the NUL fd key and let vdrm own the connection.
+sub("src/panfrost/vulkan/panvk_vX_device.c",
+    "#ifdef HAVE_PAN_KMOD_KBASE\n#include <fcntl.h>\n#endif",
+    "#ifdef HAVE_PAN_KMOD_KBASE\n#include <fcntl.h>\n"
+    "#ifdef _WIN32\n#include <io.h>\n#include <stdio.h>\n#endif\n#endif")
+
+sub("src/panfrost/vulkan/panvk_vX_device.c",
+    "      int kbase_fd =\n"
+    "         open(physical_device->kbase_node_path, O_RDWR | O_CLOEXEC);",
+    "#ifdef _WIN32\n"
+    "      int kbase_fd = _open(\"NUL\", _O_RDWR);\n"
+    "#else\n"
+    "      int kbase_fd =\n"
+    "         open(physical_device->kbase_node_path, O_RDWR | O_CLOEXEC);\n"
+    "#endif\n"
+    "      fprintf(stderr, \"[panvk-win] create_device kbase_fd=%d errno=%d path=%s\\n\",\n"
+    "              kbase_fd, errno, physical_device->kbase_node_path);\n"
+    "      fflush(stderr);")
+
+sub("src/panfrost/vulkan/panvk_vX_device.c",
+    "         if (!device->kmod.dev)\n            close(kbase_fd);",
+    "         fprintf(stderr, \"[panvk-win] create_device kmod.dev=%p errno=%d\\n\",\n"
+    "                 (void *)device->kmod.dev, errno);\n"
+    "         fflush(stderr);\n"
+    "         if (!device->kmod.dev)\n            close(kbase_fd);")
+
+sub("src/panfrost/vulkan/panvk_vX_device.c",
+    "   if (!device->kmod.dev) {\n"
+    "      result = panvk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,\n"
+    "                            \"cannot create device\");",
+    "   fprintf(stderr, \"[panvk-win] create_device final kmod.dev=%p errno=%d\\n\",\n"
+    "           (void *)device->kmod.dev, errno);\n"
+    "   fflush(stderr);\n"
+    "   if (!device->kmod.dev) {\n"
+    "      result = panvk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,\n"
+    "                            \"cannot create device\");")
+
+sub("src/panfrost/vulkan/panvk_vX_device.c",
+    "   device->kmod.vm =\n"
+    "      pan_kmod_vm_create(device->kmod.dev, vm_flags,\n"
+    "                         user_va_start, user_va_end - user_va_start);",
+    "   device->kmod.vm =\n"
+    "      pan_kmod_vm_create(device->kmod.dev, vm_flags,\n"
+    "                         user_va_start, user_va_end - user_va_start);\n"
+    "   fprintf(stderr, \"[panvk-win] pan_kmod_vm_create -> %p errno=%d\\n\",\n"
+    "           (void *)device->kmod.vm, errno);\n"
+    "   fflush(stderr);")
+
+sub("src/panfrost/vulkan/panvk_vX_device.c",
+    "   result = panvk_per_arch(init_tiler_oom)(device);\n"
+    "   if (result != VK_SUCCESS)",
+    "   result = panvk_per_arch(init_tiler_oom)(device);\n"
+    "   fprintf(stderr, \"[panvk-win] init_tiler_oom -> %d\\n\", (int)result);\n"
+    "   fflush(stderr);\n"
+    "   if (result != VK_SUCCESS)")
+
+sub("src/panfrost/vulkan/panvk_vX_device.c",
+    "panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,\n"
+    "                              const VkDeviceCreateInfo *pCreateInfo,\n"
+    "                              const VkAllocationCallbacks *pAllocator,\n"
+    "                              VkDevice *pDevice)\n"
+    "{\n"
+    "   struct panvk_instance *instance =\n"
+    "      to_panvk_instance(physical_device->vk.instance);\n"
+    "   VkResult result;",
+    "panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,\n"
+    "                              const VkDeviceCreateInfo *pCreateInfo,\n"
+    "                              const VkAllocationCallbacks *pAllocator,\n"
+    "                              VkDevice *pDevice)\n"
+    "{\n"
+    "   struct panvk_instance *instance =\n"
+    "      to_panvk_instance(physical_device->vk.instance);\n"
+    "   VkResult result;\n"
+    "   fprintf(stderr, \"[panvk-win] create_device: enter\\n\");\n"
+    "   fflush(stderr);")
+
+sub("src/panfrost/vulkan/panvk_priv_bo.c",
+    "#include \"kmod/pan_kmod.h\"",
+    "#include \"kmod/pan_kmod.h\"\n#ifdef _WIN32\n#include <stdio.h>\n#endif")
+sub("src/panfrost/vulkan/panvk_priv_bo.c",
+    "   struct pan_kmod_bo *bo =\n"
+    "      pan_kmod_bo_alloc(dev->kmod.dev, dev->kmod.vm, size, flags);\n"
+    "   if (!bo) {",
+    "   struct pan_kmod_bo *bo =\n"
+    "      pan_kmod_bo_alloc(dev->kmod.dev, dev->kmod.vm, size, flags);\n"
+    "   if (!bo) {\n"
+    "      fprintf(stderr, \"[panvk-win] priv_bo_create size=%llu flags=0x%x -> NULL errno=%d\\n\",\n"
+    "              (unsigned long long)size, flags, errno);\n"
+    "      fflush(stderr);")
+
 # --------------------------------------------------------------------------
 # WSI: no DRM device on Windows; wsi_common still supplies the Win32/GDI
 # surface.  Keep the default CPU path.
