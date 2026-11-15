@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Windows build stand-in for Mesa's mesa_clc: the Panfrost libpan SPIR-V is
+# prebuilt by the Linux job and copied in; this selects the requested PAN_ARCH.
+import os
+import shutil
+import sys
+
+args = sys.argv[1:]
+out = args[args.index("-o") + 1]
+dep = args[args.index("--depfile") + 1] if "--depfile" in args else None
+arch = next(x.split("=", 1)[1] for x in args if x.startswith("-DPAN_ARCH="))
+src = os.path.join(os.environ["LIBPAN_PREBUILT"], "libpan_v%s.spv" % arch)
+shutil.copyfile(src, out)
+if dep:
+    with open(dep, "w") as f:
+        f.write("%s: %s\n" % (out.replace("\\", "/"), src.replace("\\", "/")))

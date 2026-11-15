@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Windows build stand-in for Mesa's vtn_bindgen2: copies the C++ bindings the
+# Linux job generated from the same prebuilt libpan SPIR-V.
+import os
+import shutil
+import sys
+
+spv, cpp, h = sys.argv[1:4]
+base = os.path.splitext(os.path.basename(spv))[0]
+pre = os.environ["LIBPAN_PREBUILT"]
+shutil.copyfile(os.path.join(pre, base + ".cpp"), cpp)
+shutil.copyfile(os.path.join(pre, base + ".h"), h)
+</<｜place▁holder▁no▁572｜> parameter>

@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   libpan:
-    if: ${{ false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -59,6 +58,7 @@ jobs:
           if-no-files-found: error
 
   panvk:
+    needs: libpan
     runs-on: windows-11-arm
     timeout-minutes: 120
     steps:
@@ -67,8 +67,6 @@ jobs:
         with:
           name: libpan-prebuilt
           path: libpan
-          run-id: 43718642940
-          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -82,12 +80,8 @@ jobs:
           Invoke-WebRequest $u -OutFile wfb.zip
           Expand-Archive wfb.zip -DestinationPath C:\winflexbison
           "C:\winflexbison" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-          $g = 'https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip'
-          Invoke-WebRequest $g -OutFile glslang.zip
-          Expand-Archive glslang.zip -DestinationPath C:\glslang
-          $gv = Get-ChildItem C:\glslang -Recurse -Filter glslangValidator.exe | Select-Object -First 1
-          if (-not $gv) { throw 'glslangValidator.exe missing' }
-          $gv.DirectoryName | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "$pwd\ci\clc-stubs" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "LIBPAN_PREBUILT=$pwd\libpan" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: arm64
@@ -137,7 +131,7 @@ jobs:
             -Dplatforms=windows `
             -Dvulkan-drivers=panfrost `
             '-Dgallium-drivers=' `
-            -Dmesa-clc=auto `
+            -Dmesa-clc=system `
             -Dllvm=disabled `
             -Dopengl=false -Dgles1=disabled -Dgles2=disabled `
             -Degl=disabled -Dglx=disabled -Dgbm=disabled `

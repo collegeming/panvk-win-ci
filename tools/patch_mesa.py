@@ -49,6 +49,58 @@ def wrap(rel, start_marker, end_marker, before):
 
 
 # --------------------------------------------------------------------------
+# Windows header shadow tree (POSIX/libdrm stand-ins).
+# --------------------------------------------------------------------------
+sub("include/meson.build",
+    "inc_include = [include_directories('.')]",
+    "inc_include = [include_directories('.'), include_directories('win32-compat')]")
+
+# --------------------------------------------------------------------------
+# Windows M2: no glslang/BVH ray-tracing build, and only the G2-Ultra (v15)
+# per-arch PanVK library.  Both cut unrelated tool and compile surface.
+# --------------------------------------------------------------------------
+sub("meson.build",
+    "with_bvh = with_amd_vk or with_intel_vk or with_swrast_vk or with_freedreno_vk or with_panfrost_vk",
+    "with_bvh = (with_amd_vk or with_intel_vk or with_swrast_vk or with_freedreno_vk or with_panfrost_vk) and host_machine.system() != 'windows'")
+
+sub("src/panfrost/vulkan/meson.build",
+    "subdir('bvh')\n\nrt_archs = [15]",
+    "if host_machine.system() != 'windows'\n"
+    "  subdir('bvh')\n"
+    "  rt_archs = [15]\n"
+    "else\n"
+    "  panvk_bvh_spv = []\n"
+    "  rt_archs = []\n"
+    "endif")
+
+sub("src/panfrost/vulkan/meson.build",
+    "foreach arch : [6, 7, 10, 11, 12, 13, 14, 15]",
+    "foreach arch : [15]")
+
+sub("src/panfrost/vulkan/meson.build",
+    "    '--device-prefix', 'panvk_v6', '--device-prefix', 'panvk_v7',\n"
+    "    '--device-prefix', 'panvk_v9', '--device-prefix', 'panvk_v10',\n"
+    "    '--device-prefix', 'panvk_v11', '--device-prefix', 'panvk_v12',\n"
+    "    '--device-prefix', 'panvk_v13', '--device-prefix', 'panvk_v14',\n"
+    "    '--device-prefix', 'panvk_v15',\n",
+    "    '--device-prefix', 'panvk_v15',\n")
+
+sub("src/panfrost/vulkan/panvk_macros.h",
+    "#else\n#error \"Unsupported arch\"\n#endif\n#endif\n\n#endif\n",
+    "#else\n#error \"Unsupported arch\"\n#endif\n#endif\n\n"
+    "#ifdef _WIN32\n"
+    "/* M2 targets only Mali-G2-Ultra (v15); the other per-arch libraries are\n"
+    " * not built on Windows, so resolve every dispatch to v15. */\n"
+    "#undef panvk_arch_dispatch\n"
+    "#undef panvk_arch_dispatch_ret\n"
+    "#define panvk_arch_dispatch(arch, name, ...) \\\n"
+    "   do { (void)(arch); panvk_arch_name(name, v15)(__VA_ARGS__); } while (0)\n"
+    "#define panvk_arch_dispatch_ret(arch, name, ret, ...) \\\n"
+    "   do { (void)(arch); ret = panvk_arch_name(name, v15)(__VA_ARGS__); } while (0)\n"
+    "#endif\n\n"
+    "#endif\n")
+
+# --------------------------------------------------------------------------
 # kmod build: use the vdrm transport instead of the Linux virtgpu ioctls.
 # --------------------------------------------------------------------------
 sub("src/panfrost/lib/kmod/meson.build",
