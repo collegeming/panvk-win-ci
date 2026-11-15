@@ -74,6 +74,11 @@ sub("src/panfrost/vulkan/meson.build",
     "endif")
 
 sub("src/panfrost/vulkan/meson.build",
+    "  [libpanvk_files, panvk_entrypoints, panvk_tracepoints, panvk_drirc],",
+    "  [libpanvk_files, panvk_entrypoints, panvk_tracepoints, panvk_drirc,\n"
+    "   files('panvk_win_rt_stubs.c')],")
+
+sub("src/panfrost/vulkan/meson.build",
     "foreach arch : [6, 7, 10, 11, 12, 13, 14, 15]",
     "foreach arch : [15]")
 
