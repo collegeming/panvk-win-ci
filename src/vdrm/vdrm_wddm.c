@@ -1287,9 +1287,12 @@ wddm_bo_create(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
 
    alloc_priv.blob.tag = VIRTIO_WDDM_ALLOCATE_BLOB_TAG;
    alloc_priv.blob.id = blob_id;
-   const bool guest_alloc = vdev->supports_guest_alloc && blob_id != 0;
-   alloc_priv.blob.mem = guest_alloc ? VIRTIO_WDDM_BLOB_MEM_HOST3D_GUEST : VIRTIO_WDDM_BLOB_MEM_HOST3D;
-   if (guest_alloc) blob_flags |= VIRTIO_WDDM_BLOB_FLAG_CREATE_GUEST_HANDLE;
+   /* Always HOST3D + MAPPABLE, matching Linux kbv_bo_alloc()
+    * (blob_mem = 2, blob_flags = 1). The host mali_kbase_renderer.c blob()
+    * path requires flags == VIRGL_RENDERER_BLOB_FLAG_USE_MAPPABLE exactly
+    * when blob_id != 0; adding CREATE_GUEST_HANDLE (0x8) or using
+    * HOST3D_GUEST makes it return -EINVAL. */
+   alloc_priv.blob.mem = VIRTIO_WDDM_BLOB_MEM_HOST3D;
    alloc_priv.blob.flags = (VIRTIO_WDDM_BlobFlag)blob_flags;
    alloc_priv.blob.size = size;
 
