@@ -18,3 +18,10 @@ static inline int poll(struct pollfd *fds, unsigned long nfds, int timeout)
    errno = ENOSYS;
    return -1;
 }
+static inline int ppoll(struct pollfd *fds, unsigned long nfds,
+                        const struct timespec *timeout, const void *sigmask)
+{
+   (void)fds; (void)nfds; (void)timeout; (void)sigmask;
+   errno = ENOSYS;
+   return -1;
+}

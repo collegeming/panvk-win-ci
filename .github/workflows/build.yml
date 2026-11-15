@@ -13,10 +13,6 @@ permissions:
 
 jobs:
   libpan:
-    # The libpan SPIR-V prebuild is platform independent and already uploaded
-    # by run 43718642940.  Keep the job for a manual refresh, but skip it by
-    # default so the Windows iteration loop is ~3 minutes shorter.
-    if: ${{ false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -37,11 +33,12 @@ jobs:
       - name: Configure
         run: |
           meson setup build mesa -Dbuildtype=release \
-            -Dgallium-drivers=panfrost -Dvulkan-drivers= -Dplatforms= \
+            -Dgallium-drivers=panfrost -Dvulkan-drivers=panfrost \
+            -Dpanfrost-kmds=panfrost -Dplatforms= \
             -Dglx=disabled -Degl=disabled -Dgbm=disabled \
             -Dllvm=enabled -Dmesa-clc=enabled -Dvideo-codecs= -Dbuild-tests=false \
             || { tail -80 build/meson-logs/meson-log.txt; exit 1; }
-      - name: Build libpan + shaders
+      - name: Build libpan + libpoly shaders
         run: |
           targets=""
           for v in 4 5 6 7 9 10 11 12 13 14 15; do
@@ -51,17 +48,25 @@ jobs:
               src/panfrost/libpan/libpan_shaders_v$v.c \
               src/panfrost/libpan/libpan_shaders_v$v.h"
           done
+          targets="$targets src/poly/cl/libpoly.spv src/poly/cl/libpoly.cpp src/poly/cl/libpoly.h"
           ninja -C build $targets || { tail -80 build/meson-logs/meson-log.txt; exit 1; }
-          mkdir -p libpan
+          mkdir -p libpan libpoly
           cp build/src/panfrost/libpan/libpan_v*.* build/src/panfrost/libpan/libpan_shaders_v*.* libpan/
-          ls -la libpan | head
+          cp build/src/poly/cl/libpoly.spv build/src/poly/cl/libpoly.cpp build/src/poly/cl/libpoly.h libpoly/
+          ls -la libpan libpoly | head -20
       - uses: actions/upload-artifact@v4
         with:
           name: libpan-prebuilt
           path: libpan/
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libpoly-prebuilt
+          path: libpoly/
+          if-no-files-found: error
 
   panvk:
+    needs: libpan
     runs-on: windows-11-arm
     timeout-minutes: 120
     steps:
@@ -70,8 +75,10 @@ jobs:
         with:
           name: libpan-prebuilt
           path: libpan
-          run-id: 43718642940
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: libpoly-prebuilt
+          path: libpoly
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -118,6 +125,8 @@ jobs:
           }
           Copy-Item libpan\* mesa\src\panfrost\libpan\ -Force
           Copy-Item vendor\libpan-prebuilt.meson.build mesa\src\panfrost\libpan\meson.build -Force
+          Copy-Item libpoly\* mesa\src\poly\cl\ -Force
+          Copy-Item vendor\libpoly-prebuilt.meson.build mesa\src\poly\cl\meson.build -Force
           New-Item -ItemType Directory -Force mesa\src\panfrost\lib\kmod\vdrm | Out-Null
           Copy-Item src\vdrm\* mesa\src\panfrost\lib\kmod\vdrm\ -Force
           Copy-Item src\mali_kbase_vdrm_win.c mesa\src\panfrost\lib\kmod\ -Force

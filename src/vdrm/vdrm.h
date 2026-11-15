@@ -12,11 +12,20 @@
 #ifndef __VDRM_H__
 #define __VDRM_H__
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "util/simple_mtx.h"
 
 #include "virtio/virtio-gpu/drm_hw.h"
+
+/* Local replacement for Mesa's two-argument align(); defining a macro named
+ * align breaks Windows SDK DECLSPEC_ALIGN/__declspec(align()). */
+static inline size_t
+vdrm_align(size_t x, size_t a)
+{
+   return (x + a - 1) & ~(a - 1);
+}
 
 #ifdef __cplusplus
 extern "C" {

@@ -1,0 +1,16 @@
+# Prebuilt libpoly shaders for the Windows ARM64 build.
+# libpoly.spv / libpoly.cpp / libpoly.h are generated on Linux (LLVM/mesa_clc)
+# and copied in; this file replaces src/poly/cl/meson.build.
+libpoly_shaders_spv = declare_dependency(
+  include_directories : include_directories('.'),
+)
+
+libpoly_shaders = declare_dependency(
+  sources : [files('libpoly.cpp'), files('libpoly.h')],
+  include_directories : include_directories('.'),
+)
+
+idep_libpoly = declare_dependency(
+  sources : [files('libpoly.cpp'), files('libpoly.h')],
+  include_directories : include_directories('.'),
+)

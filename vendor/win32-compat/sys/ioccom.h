@@ -12,3 +12,6 @@
 #define _IOR(g, n, t)   _IOC(IOC_OUT, (g), (n), sizeof(t))
 #define _IOW(g, n, t)   _IOC(IOC_IN, (g), (n), sizeof(t))
 #define _IOWR(g, n, t)  _IOC(IOC_INOUT, (g), (n), sizeof(t))
+#define _IOC_NR(nr)     ((unsigned)((nr) & 0xffu))
+#define _IOC_TYPE(nr)   ((unsigned)(((nr) >> 8) & 0xffu))
+#define _IOC_SIZE(nr)   ((unsigned)(((nr) >> 16) & IOCPARM_MASK))

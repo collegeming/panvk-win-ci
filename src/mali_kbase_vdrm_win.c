@@ -239,8 +239,10 @@ int kbv_bo_alloc(int fd, uint64_t size, uint64_t flags, bool shared, uint32_t *h
    unsigned slot;
    for (slot = 0; ctx && slot < 1024 && ctx->bo[slot].ptr; slot++);
    if (ctx && slot < 1024) {
-      ctx->bo[slot] = (typeof(ctx->bo[slot])){ .handle = *handle, .gem = vgem,
-                                               .ptr = ptr, .size = size };
+      ctx->bo[slot].handle = *handle;
+      ctx->bo[slot].gem = vgem;
+      ctx->bo[slot].ptr = ptr;
+      ctx->bo[slot].size = size;
    }
    simple_mtx_unlock(&lock);
    if (!ctx || slot >= 1024) {
@@ -358,7 +360,9 @@ bool kbv_queue_bind(int fd, uint32_t group, uint32_t csi, uint64_t va,
    unsigned slot;
    for (slot = 0; ctx && slot < 32 && ctx->queue[slot].ptr; slot++);
    if (ctx && slot < 32) {
-      ctx->queue[slot] = (typeof(ctx->queue[slot])){ .ptr = ptr, .va = va, .gem = gem };
+      ctx->queue[slot].ptr = ptr;
+      ctx->queue[slot].va = va;
+      ctx->queue[slot].gem = gem;
    }
    simple_mtx_unlock(&lock);
    if (!ctx || slot >= 32) {
