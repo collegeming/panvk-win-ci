@@ -52,4 +52,30 @@ ins("src/panfrost/lib/kmod/vdrm/vdrm_wddm.c",
     "      fprintf(stderr, \"win-panvk: vdrm_wddm_connect failed at %s\\n\", stage);\n"
     "      WDDM_DEBUG(\"connect failed at %s\\n\", stage);")
 
+ins("src/panfrost/vulkan/panvk_physical_device.c",
+    "   fd = _open(\"NUL\", _O_RDWR);",
+    "   fd = _open(\"NUL\", _O_RDWR);\n"
+    "   fprintf(stderr, \"win-panvk: _open NUL fd=%d errno=%d\n\", fd, errno);")
+
+ins("src/panfrost/vulkan/panvk_physical_device.c",
+    "   device->kmod.dev = pan_kmod_dev_create_with_driver(fd, flags, \"kbase\", NULL,",
+    "   fprintf(stderr, \"win-panvk: pan_kmod_dev_create begin fd=%d flags=0x%x\n\", fd, flags);\n"
+    "   device->kmod.dev = pan_kmod_dev_create_with_driver(fd, flags, \"kbase\", NULL,")
+
+ins("src/panfrost/vulkan/panvk_physical_device.c",
+    "      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,\n"
+    "                          \"failed to create kbase device at %s\", path);",
+    "      fprintf(stderr, \"win-panvk: pan_kmod_dev_create failed errno=%d\n\", errno);\n"
+    "      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,\n"
+    "                          \"failed to create kbase device at %s\", path);")
+
+ins("src/panfrost/lib/kmod/kbase_kmod.c",
+    "kbase_kmod_dev_create(int fd, uint32_t flags,",
+    "kbase_kmod_dev_create(int fd, uint32_t flags,")
+
+ins("src/panfrost/lib/kmod/kbase_kmod.c",
+    "   struct kbase_ioctl_version_check ver = { 0 };",
+    "   fprintf(stderr, \"win-panvk: kbase_kmod_dev_create fd=%d\n\", fd);\n"
+    "   struct kbase_ioctl_version_check ver = { 0 };")
+
 print(f"diag: {edits} edits")
