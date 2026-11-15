@@ -163,9 +163,8 @@ jobs:
             '-Dvideo-codecs=' -Dmicrosoft-clc=disabled -Dspirv-to-dxil=false `
             -Dzstd=disabled -Dshader-cache=disabled -Dbuild-tests=false `
             -Dpanfrost-kmds=kbase `
-            '-Dc_args=/MT -DHAVE_FUNC_ATTRIBUTE_PACKED' `
-            '-Dcpp_args=/MT -DHAVE_FUNC_ATTRIBUTE_PACKED' `
-            -Dc_link_args=/MT -Dcpp_link_args=/MT
+            '-Dc_args=-DHAVE_FUNC_ATTRIBUTE_PACKED' `
+            '-Dcpp_args=-DHAVE_FUNC_ATTRIBUTE_PACKED'
           if ($LASTEXITCODE) { if (Test-Path build\meson-logs\meson-log.txt) { Get-Content build\meson-logs\meson-log.txt -Tail 100 }; throw 'meson setup failed' }
       - name: Build
         shell: pwsh
@@ -200,12 +199,22 @@ jobs:
           Copy-Item $dll out\vulkan_virtio.dll
           Copy-Item .\vk_enum.exe out\vk_enum.exe
           Copy-Item .\vk_enum.out out\vk_enum.out
+          $vcr = 'C:\Windows\System32\vcruntime140.dll'
+          if (Test-Path $vcr) {
+            Copy-Item $vcr out\vcruntime140.dll
+          } else {
+            Write-Host 'vcruntime140.dll not found on runner'
+          }
           if ($icd) { Copy-Item $icd out\manet_icd.json }
           '{"file_format_version":"1.0.1","ICD":{"library_path":"./vulkan_virtio.dll","api_version":"1.4.363"}}' |
             Set-Content -Encoding ascii out\vulkan_virtio_icd.json
           $h = Get-FileHash out\vulkan_virtio.dll -Algorithm SHA256
           "$($h.Hash)  vulkan_virtio.dll" | Tee-Object -FilePath out\SHA256SUMS.txt
           "$($h.Hash)  vulkan_manet.dll" | Add-Content out\SHA256SUMS.txt
+          if (Test-Path out\vcruntime140.dll) {
+            $hv = Get-FileHash out\vcruntime140.dll -Algorithm SHA256
+            "$($hv.Hash)  vcruntime140.dll" | Add-Content out\SHA256SUMS.txt
+          }
           $b = [IO.File]::ReadAllBytes((Resolve-Path out\vulkan_virtio.dll))
           $pe = [BitConverter]::ToInt32($b, 0x3c)
           $machine = [BitConverter]::ToUInt16($b, $pe + 4)
