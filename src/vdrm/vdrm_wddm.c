@@ -81,6 +81,10 @@
 #define NT_SUCCESS(status) (((NTSTATUS)(status)) >= 0)
 #endif
 
+#ifndef ENOTSUP
+#define ENOTSUP ENOSYS
+#endif
+
 /* 句柄表的初始容量与硬上限。上限只为防跑飞，不是设计容量：真实 D3D11 应用的
  * BO 数轻松过千，表按需翻倍。 */
 #define VDRM_WDDM_ALLOCS_INITIAL 256
@@ -1464,84 +1468,21 @@ vdrm_wddm_set_runtime_allocator(struct vdrm_device *vdev, void *ctx,
    WDDM_DEBUG("runtime allocator installed ctx=%p\n", ctx);
 }
 
-/* Host-side KB_IMPORT_SHARED (ccmd 16): ask the renderer to import the
- * producer's shared blob into *this* virgl context.  The renderer returns a
- * per-context GPU VA for the imported kbase mapping; without it the consumer
- * would have to use VA 0 and every sampled byte reads as zero.
- *
- * The ccmd layout is the same private kb_req/kb_rsp pair used by the other
- * KB_* commands (see host/mali_kbase_renderer.c). */
-struct wddm_kb_import_req {
-   struct vdrm_ccmd_req hdr;
-   uint32_t handle, offset, size, reserved;
-   uint8_t data[1024];
-};
-struct wddm_kb_import_rsp {
-   struct vdrm_ccmd_rsp hdr;
-   int32_t status;
-   uint32_t handle, size;
-   uint64_t value;
-   uint8_t data[1024];
-};
-
-static int
-wddm_import_shared_blob(struct vdrm_wddm *w, uint32_t blob_id,
-                        uint64_t size, uint64_t *gpu_va)
-{
-   struct wddm_kb_import_req q = {0};
-   struct wddm_kb_import_rsp *r;
-   int ret;
-
-   *gpu_va = 0;
-   if (!blob_id || size > UINT32_MAX)
-      return -EINVAL;
-
-   q.hdr.cmd = 16;
-   q.hdr.len = sizeof(q);
-   q.handle = blob_id;
-   q.size = (uint32_t)size;
-
-   r = vdrm_alloc_rsp(&w->base, &q.hdr, sizeof(*r));
-   if (!r)
-      return -ENOMEM;
-
-   ret = vdrm_send_req(&w->base, &q.hdr, true);
-   if (ret) {
-      WDDM_DEBUG("KB_IMPORT_SHARED blob=%u size=%llu send failed: %d\n",
-                 blob_id, (unsigned long long)size, ret);
-      return ret;
-   }
-   if (r->status) {
-      WDDM_DEBUG("KB_IMPORT_SHARED blob=%u size=%llu status=%d\n",
-                 blob_id, (unsigned long long)size, r->status);
-      return r->status;
-   }
-   if (!r->value) {
-      WDDM_DEBUG("KB_IMPORT_SHARED blob=%u returned VA 0\n", blob_id);
-      return -ENOENT;
-   }
-
-   *gpu_va = r->value;
-   WDDM_DEBUG("KB_IMPORT_SHARED blob=%u size=%llu -> va=0x%llx\n",
-              blob_id, (unsigned long long)size,
-              (unsigned long long)*gpu_va);
-   return 0;
-}
-
-/* 借用一个别人建的 allocation：只做 ResourceInfo 取 res_id，不 CreateAllocation。
+/* 借用一个别人建的 allocation：先通过 ResourceInfo 取 blob 元数据，再在
+ * ReuseBlobAllocation 之前让 kbv 的 KB_IMPORT_SHARED 把生产者的共享 blob 导入
+ * 本 context，最后 CreateAllocation 建立本设备的引用。
  *
  * 用途是跨进程共享——UMD（或另一个进程 OpenResource2 之后）已经有了 WDDM
  * allocation，我们要在本 context 里用同一块 backing 跑 ccmd。res_id 是 host 侧
- * 的资源标识，同一 backing 在任何 context 里查出来都一样；GPU 地址不是，得由调用
- * 方在自己的 VA slice 里分配后 GEM_SET_IOVA 绑定（host drm2kgsl 按 context 切
- * slice，见 kgsl_iova_in_slice）。
+ * 的资源标识，同一 backing 在任何 context 里查出来都一样；GPU VA 是 per-context
+ * 的，由 KB_IMPORT_SHARED 在导入时返回。
  *
  * size 由 KMD 报告而非调用方给定：持有者可能按 64 KiB guest-alloc 粒度向上取整，
  * 用调用方的估算值会让 iova 区间短于实际映射，越界访问只会在 GPU fault 时才暴露。
  */
 static uint32_t
 wddm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
-                     uint64_t *size, uint64_t *gpu_va)
+                     uint64_t *size, uint64_t *gpu_va, uint32_t *host_handle)
 {
    struct vdrm_wddm *w = (struct vdrm_wddm *)vdev;
    VIRTIO_WDDM_ResourceInfo res_info = {0};
@@ -1550,11 +1491,14 @@ wddm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
    uint64_t bytes;
    uint32_t handle;
    uint64_t imported_va = 0;
+   uint32_t imported_host = 0;
 
-   if (!kmt)
-      return 0;
    if (gpu_va)
       *gpu_va = 0;
+   if (host_handle)
+      *host_handle = 0;
+   if (!kmt)
+      return 0;
 
    res_info.tag = VIRTIO_WDDM_ESCAPE_RESOURCE_INFO_TAG;
    res_info.handle = kmt;
@@ -1579,17 +1523,38 @@ wddm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
       return 0;
 
    /* Make the producer's shared blob visible in this renderer context before
-    * the KMD queues RESOURCE_CREATE_BLOB for the reused allocation.  The
-    * returned VA is the address this context's native submits must use. */
+    * the KMD queues RESOURCE_CREATE_BLOB for the reused allocation.  The kbv
+    * callback sends KB_IMPORT_SHARED through rpc() and returns both the VA this
+    * context's native submits must use and the host handle to release later.
+    *
+    * ENOTSUP (old host), ENOENT (not a registered shared blob), EINVAL (size
+    * mismatch) and ENOSPC (host table full) are soft failures: keep VA 0 and
+    * let the Reuse path decide whether the allocation is still usable.  Any
+    * other error is a transport/device failure, so do not proceed to Reuse. */
    if (res_info.info.blob.blob.id) {
-      int import_ret = wddm_import_shared_blob(w,
-                          (uint32_t)res_info.info.blob.blob.id, bytes,
-                          &imported_va);
-      if (import_ret)
-         WDDM_DEBUG("alloc_to_handle: shared import id=%llu failed: %d "
-                    "(consumer keeps VA 0)\n",
-                    (unsigned long long)res_info.info.blob.blob.id, import_ret);
+      uint64_t blob_id = res_info.info.blob.blob.id;
+
+      if (blob_id > UINT32_MAX) {
+         WDDM_DEBUG("alloc_to_handle: blob id 0x%llx exceeds 32 bits; "
+                    "consumer keeps VA 0\n", (unsigned long long)blob_id);
+      } else if (vdev->import_shared) {
+         int import_ret = vdev->import_shared(vdev, (uint32_t)blob_id, bytes,
+                                              &imported_va, &imported_host);
+         if (import_ret) {
+            WDDM_DEBUG("alloc_to_handle: shared import id=%llu failed: %s "
+                       "(consumer keeps VA 0)\n",
+                       (unsigned long long)blob_id, strerror(errno));
+            if (errno != ENOTSUP && errno != ENOENT &&
+                errno != EINVAL && errno != ENOSPC)
+               return 0;
+         }
+      }
    }
+
+   /* Publish a successfully created host import immediately: if the Reuse or
+    * table insertion below fails, the caller must still release it. */
+   if (host_handle)
+      *host_handle = imported_host;
 
    /* The runtime opened on its own device. Acquire a device-local reference
     * so OpenAllocation attaches this backing to the ICD context as well.
@@ -1618,12 +1583,15 @@ wddm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
    if (size)
       *size = bytes;
    if (gpu_va)
-      *gpu_va = imported_va ? imported_va : ai.GpuVirtualAddress;
+      *gpu_va = imported_va;   /* 0 = not mapped; never a WDDM VA */
+   if (host_handle)
+      *host_handle = imported_host;
    residency_make_resident(w, ai.hAllocation, bytes);
 
-   WDDM_DEBUG("alloc_to_handle: kmt=0x%x res_id=%u size=%llu -> handle=%u va=0x%llx\n",
+   WDDM_DEBUG("alloc_to_handle: kmt=0x%x res_id=%u size=%llu -> handle=%u "
+              "va=0x%llx host=0x%x\n",
               kmt, res_info.id, (unsigned long long)bytes, handle,
-              (unsigned long long)(gpu_va ? *gpu_va : 0));
+              (unsigned long long)imported_va, imported_host);
    return handle;
 }
 

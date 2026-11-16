@@ -12,6 +12,7 @@
  */
 #include <errno.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -21,6 +22,11 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#endif
+
+/* UCRT and MinGW both provide ENOTSUP, but keep a fallback for older SDKs. */
+#ifndef ENOTSUP
+#define ENOTSUP ENOSYS
 #endif
 
 #include "util/simple_mtx.h"
@@ -45,13 +51,28 @@ struct kbv_rsp {
    uint64_t value;
    uint8_t data[1024];
 };
+
+/* Wire layout shared with the host's private struct kb_req/kb_rsp.  These
+ * commands are sent through rpc(), not the generic vdrm request path. */
+_Static_assert(sizeof(struct vdrm_ccmd_req) == 16, "vdrm ccmd req ABI");
+_Static_assert(sizeof(struct vdrm_ccmd_rsp) == 4, "vdrm ccmd rsp ABI");
+_Static_assert(sizeof(struct kbv_req) == 1056, "kb_req ABI");
+_Static_assert(offsetof(struct kbv_req, handle) == 16, "kb_req.handle");
+_Static_assert(offsetof(struct kbv_req, data) == 32, "kb_req.data");
+_Static_assert(sizeof(struct kbv_rsp) == 1048, "kb_rsp ABI");
+_Static_assert(offsetof(struct kbv_rsp, status) == 4, "kb_rsp.status");
+_Static_assert(offsetof(struct kbv_rsp, value) == 16, "kb_rsp.value");
+_Static_assert(offsetof(struct kbv_rsp, data) == 24, "kb_rsp.data");
+
 struct kbv_ctx {
    int fd;
    int error;
    uint32_t gem, seqno, rsp_off;
+   bool caps_import_shared;   /* host cmd 0 r.handle bit 0 */
    struct vdrm_device *vdev;
    struct {
       uint32_t handle;
+      uint32_t host_handle;   /* KB_IMPORT_SHARED host BO handle; 0 otherwise */
       uint32_t gem;
       uint32_t km_resource;   /* runtime-owned BO only; 0 otherwise */
       void *ptr;
@@ -63,6 +84,12 @@ struct kbv_ctx {
 };
 static struct kbv_ctx contexts[16];
 static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
+
+static int rpc(int fd, struct kbv_req *q, struct kbv_rsp *r);
+static int kbv_import_shared_cb(struct vdrm_device *vdev, uint32_t blob_id,
+                                uint64_t size, uint64_t *gpu_va,
+                                uint32_t *host_handle);
+static void kbv_release_import(int fd, uint32_t host_handle);
 
 /* The D3D UMD's runtime allocator (VkD3DDDIRuntimeAllocator), installed by
  * panvk_CreateInstance() before any device is created.  Every vdrm context
@@ -203,7 +230,35 @@ int kbv_init(int fd, uint16_t *major, uint16_t *minor)
       .fd = fd,
       .vdev = vdev,
    };
+   vdev->import_shared = kbv_import_shared_cb;
    simple_mtx_unlock(&lock);
+
+   /* Probe KB_IMPORT_SHARED support with the existing KB_INFO command.  A host
+    * that implements cmd 16 sets bit 0 of r.handle; old hosts leave it zero,
+    * which keeps us on the VA-0 path instead of sending an unknown ccmd that
+    * would be rejected. */
+   {
+      struct kbv_req q = { .cmd = 0 };
+      struct kbv_rsp r;
+      bool import_shared = false;
+
+      if (rpc(fd, &q, &r) == 0) {
+         import_shared = (r.handle & 1) != 0;
+         fprintf(stderr, "[kbv-win] host caps: import_shared=%d (r.handle=0x%x)\n",
+                 import_shared, r.handle);
+      } else {
+         fprintf(stderr, "[kbv-win] host caps query failed: %s\n",
+                 strerror(errno));
+      }
+      fflush(stderr);
+
+      simple_mtx_lock(&lock);
+      ctx = lookup(fd);
+      if (ctx)
+         ctx->caps_import_shared = import_shared;
+      simple_mtx_unlock(&lock);
+   }
+
    *major = vdev->caps.version_major;
    *minor = vdev->caps.version_minor;
    return 1;
@@ -229,15 +284,15 @@ static int rpc(int fd, struct kbv_req *q, struct kbv_rsp *r)
       errno = EPROTO;
       goto out;
    }
-   q->len = sizeof(*q);
+   q->len = (uint32_t)sizeof(*q);
    if (ctx->rsp_off + sizeof(*r) > ctx->vdev->rsp_mem_len)
       ctx->rsp_off = 0;
    q->rsp_off = ctx->rsp_off;
-   ctx->rsp_off = (ctx->rsp_off + sizeof(*r) + 7) & ~7u;
+   ctx->rsp_off = (ctx->rsp_off + (uint32_t)sizeof(*r) + 7) & ~7u;
 
    struct kbv_rsp *shared_rsp =
       (void *)((uint8_t *)ctx->vdev->rsp_mem + q->rsp_off);
-   shared_rsp->len = sizeof(*r);
+   shared_rsp->len = (uint32_t)sizeof(*r);
 
    struct vdrm_execbuf_params p = {
       .req = (struct vdrm_ccmd_req *)q,
@@ -256,6 +311,98 @@ static int rpc(int fd, struct kbv_req *q, struct kbv_rsp *r)
 out:
    simple_mtx_unlock(&lock);
    return ret;
+}
+
+/* KB_IMPORT_SHARED: ask the host to import a producer's shared blob into this
+ * context and return the per-context kbase VA plus the host BO handle used to
+ * release that import.  Always goes through rpc() so it shares the KB command
+ * serialization and response ring with every other KB_* command. */
+static int
+kbv_import_shared(int fd, uint32_t blob_id, uint64_t size, uint64_t *gpu_va,
+                  uint32_t *host_handle)
+{
+   bool found;
+   bool supported;
+
+   if (gpu_va)
+      *gpu_va = 0;
+   if (host_handle)
+      *host_handle = 0;
+   if (!blob_id || size > UINT32_MAX) {
+      errno = EINVAL;
+      return -1;
+   }
+
+   simple_mtx_lock(&lock);
+   struct kbv_ctx *ctx = lookup(fd);
+   found = ctx != NULL;
+   supported = found && ctx->caps_import_shared;
+   simple_mtx_unlock(&lock);
+   if (!found) {
+      errno = ENODEV;
+      return -1;
+   }
+   if (!supported) {
+      errno = ENOTSUP;
+      return -1;
+   }
+
+   struct kbv_req q = { .cmd = 16, .handle = blob_id,
+                        .size = (uint32_t)size };
+   struct kbv_rsp r;
+   if (rpc(fd, &q, &r))
+      return -1;
+   if (!r.value) {
+      errno = ENOENT;
+      return -1;
+   }
+
+   if (gpu_va)
+      *gpu_va = r.value;
+   if (host_handle)
+      *host_handle = r.handle;
+   fprintf(stderr, "[kbv-win] import shared blob=%u size=%llu -> va=0x%llx host=0x%x\n",
+           blob_id, (unsigned long long)size,
+           (unsigned long long)r.value, r.handle);
+   fflush(stderr);
+   return 0;
+}
+
+static int
+kbv_import_shared_cb(struct vdrm_device *vdev, uint32_t blob_id, uint64_t size,
+                     uint64_t *gpu_va, uint32_t *host_handle)
+{
+   int fd = -1;
+
+   simple_mtx_lock(&lock);
+   for (unsigned i = 0; i < 16; i++)
+      if (contexts[i].vdev == vdev) {
+         fd = contexts[i].fd;
+         break;
+      }
+   simple_mtx_unlock(&lock);
+
+   if (fd < 0) {
+      errno = ENODEV;
+      return -1;
+   }
+   return kbv_import_shared(fd, blob_id, size, gpu_va, host_handle);
+}
+
+/* Release a host-side import.  Callers must only pass a handle taken from an
+ * imported slot (or from a just-created C2 import), never a producer's. */
+static void
+kbv_release_import(int fd, uint32_t host_handle)
+{
+   if (!host_handle)
+      return;
+
+   struct kbv_req q = { .cmd = 4, .handle = host_handle };
+   struct kbv_rsp r;
+   if (rpc(fd, &q, &r) && errno != ENOENT)
+      fprintf(stderr, "[kbv-win] release host import 0x%x failed: %s\n",
+              host_handle, strerror(errno));
+   fflush(stderr);
 }
 
 uint8_t *kbv_props(int fd, size_t *size)
@@ -322,6 +469,7 @@ int kbv_bo_alloc(int fd, uint64_t size, uint64_t flags, bool shared, uint32_t *h
    for (slot = 0; ctx && slot < 1024 && ctx->bo[slot].used; slot++);
    if (ctx && slot < 1024) {
       ctx->bo[slot].handle = *handle;
+      ctx->bo[slot].host_handle = 0;
       ctx->bo[slot].gem = vgem;
       ctx->bo[slot].km_resource = 0;
       ctx->bo[slot].ptr = ptr;
@@ -417,6 +565,7 @@ int kbv_bo_alloc_shared(int fd, uint64_t size, uint64_t flags, bool shared,
    for (slot = 0; ctx && slot < 1024 && ctx->bo[slot].used; slot++);
    if (ctx && slot < 1024) {
       ctx->bo[slot].handle = *handle;
+      ctx->bo[slot].host_handle = 0;
       ctx->bo[slot].gem = vgem;
       ctx->bo[slot].km_resource = km_resource ? *km_resource : 0;
       ctx->bo[slot].ptr = NULL;
@@ -460,9 +609,12 @@ int kbv_bo_open_platform(int fd, uint32_t kmt_handle, uint64_t *size,
 
    uint64_t real_size = 0;
    uint64_t real_va = 0;
+   uint32_t host_handle = 0;
    uint32_t vgem = vdrm_alloc_to_handle(vdev, kmt_handle, &real_size,
-                                        &real_va);
+                                        &real_va, &host_handle);
    if (!vgem) {
+      /* A KB_IMPORT_SHARED may have succeeded before the Reuse failed. */
+      kbv_release_import(fd, host_handle);
       fprintf(stderr, "[kbv-win] open KMT 0x%x: vdrm_alloc_to_handle failed\n",
               kmt_handle);
       fflush(stderr);
@@ -471,6 +623,7 @@ int kbv_bo_open_platform(int fd, uint32_t kmt_handle, uint64_t *size,
    }
    if (size && *size && real_size < *size) {
       vdrm_bo_close(vdev, vgem);
+      kbv_release_import(fd, host_handle);
       errno = EINVAL;
       return -1;
    }
@@ -485,6 +638,7 @@ int kbv_bo_open_platform(int fd, uint32_t kmt_handle, uint64_t *size,
    for (slot = 0; ctx && slot < 1024 && ctx->bo[slot].used; slot++);
    if (ctx && slot < 1024) {
       ctx->bo[slot].handle = 0;
+      ctx->bo[slot].host_handle = host_handle;
       ctx->bo[slot].gem = vgem;
       ctx->bo[slot].km_resource = 0;
       ctx->bo[slot].ptr = NULL;
@@ -495,32 +649,43 @@ int kbv_bo_open_platform(int fd, uint32_t kmt_handle, uint64_t *size,
    simple_mtx_unlock(&lock);
    if (!ctx || slot >= 1024) {
       vdrm_bo_close(vdev, vgem);
+      kbv_release_import(fd, host_handle);
       errno = ENOSPC;
       return -1;
    }
    if (size) *size = real_size;
-   fprintf(stderr, "[kbv-win] imported KMT 0x%x size=%llu gem=%u va=0x%llx\n",
+   fprintf(stderr, "[kbv-win] imported KMT 0x%x size=%llu gem=%u va=0x%llx "
+           "host=0x%x\n",
            kmt_handle, (unsigned long long)real_size, vgem,
-           (unsigned long long)real_va);
+           (unsigned long long)real_va, host_handle);
    fflush(stderr);
    return 0;
 }
 
-/* Release a platform import.  Never sends cmd 4: the allocation belongs to the
- * process that created it, and vdrm_bo_close only drops our device-local
- * reference (the KMD's imported table entry is not destroyed). */
+/* Release a platform import.  The allocation itself belongs to the process
+ * that created it: vdrm_bo_close only drops our device-local reference.  If
+ * KB_IMPORT_SHARED created a host-side import for this slot, release that
+ * import too.  Only C2 imported slots may send cmd 4; a producer's slot can
+ * carry the same numeric handle and must never be released here. */
 void kbv_bo_close_platform(int fd, uint32_t gem)
 {
+   uint32_t host_handle = 0;
+   bool release_host = false;
+
    simple_mtx_lock(&lock);
    struct kbv_ctx *ctx = lookup(fd);
    struct vdrm_device *vdev = ctx ? ctx->vdev : NULL;
    if (ctx) for (unsigned i = 0; i < 1024; i++)
       if (ctx->bo[i].used && ctx->bo[i].gem == gem) {
+         host_handle = ctx->bo[i].host_handle;
+         release_host = ctx->bo[i].imported && host_handle != 0;
          memset(&ctx->bo[i], 0, sizeof(ctx->bo[i]));
          break;
       }
    simple_mtx_unlock(&lock);
    if (vdev && gem) vdrm_bo_close(vdev, gem);
+   if (release_host)
+      kbv_release_import(fd, host_handle);
 }
 
 int kbv_bo_sync(int fd, uint32_t handle, uint64_t offset, uint64_t size, uint8_t type)

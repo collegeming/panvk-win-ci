@@ -54,10 +54,14 @@ struct vdrm_device_funcs {
     * another process may have opened via OpenResource2).  Returns a vdrm BO
     * handle that does NOT own the underlying allocation: bo_close releases the
     * vdrm-side reference only, and the platform owner remains responsible for
-    * destroying it.  Optional; NULL on backends without a notion of externally
-    * owned allocations (see vdrm_alloc_to_handle). */
+    * destroying it.  *host_handle receives the host-side handle that must be
+    * passed to KB_FREE when this adopted allocation is released, or 0 when the
+    * backend has no separate host import to release.  Optional; NULL on
+    * backends without a notion of externally owned allocations (see
+    * vdrm_alloc_to_handle). */
    uint32_t (*alloc_to_handle)(struct vdrm_device *vdev, uint32_t platform_handle,
-                               uint64_t *size, uint64_t *gpu_va);
+                               uint64_t *size, uint64_t *gpu_va,
+                               uint32_t *host_handle);
 
    uint32_t (*bo_create)(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
                          uint64_t blob_id, uint32_t blob_hints,
@@ -90,6 +94,15 @@ struct vdrm_device {
     * serializes every bo_create there). The backend clears them. */
    void *pending_shared_rt_resource;
    uint32_t pending_shared_km_resource;   /* out */
+
+   /* Optional Windows-only hook: import a producer's shared blob into this
+    * renderer context through the kbv KB_IMPORT_SHARED command and return both
+    * the per-context kbase GPU VA and the host-side handle to pass to KB_FREE
+    * when the adopted allocation is released.  Set by the kbv/WDDM shim; NULL
+    * on backends that do not support cross-context shared blobs. */
+   int (*import_shared)(struct vdrm_device *vdev, uint32_t blob_id,
+                        uint64_t size, uint64_t *gpu_va,
+                        uint32_t *host_handle);
 #endif
 
    struct vdrm_shmem *shmem;
@@ -177,15 +190,20 @@ vdrm_handle_to_res_id(struct vdrm_device *vdev, uint32_t handle)
  * which the caller must use instead of its own estimate (the owner may have
  * rounded up).  *gpu_va receives the per-context GPU virtual address of the
  * adopted backing, or 0 when the backend cannot map it into this context.
+ * *host_handle receives the host-side handle to pass to KB_FREE when the
+ * adopted allocation is released, or 0 when there is nothing to release.  On
+ * failure it is 0 unless a host import was already created before the
+ * allocation failed, in which case the caller must release it.
  * Returns 0 if unsupported by this backend or on failure.
  */
 static inline uint32_t
 vdrm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
-                     uint64_t *size, uint64_t *gpu_va)
+                     uint64_t *size, uint64_t *gpu_va, uint32_t *host_handle)
 {
    if (!vdev->funcs->alloc_to_handle)
       return 0;
-   return vdev->funcs->alloc_to_handle(vdev, platform_handle, size, gpu_va);
+   return vdev->funcs->alloc_to_handle(vdev, platform_handle, size, gpu_va,
+                                       host_handle);
 }
 
 uint32_t vdrm_bo_create(struct vdrm_device *vdev, size_t size,
