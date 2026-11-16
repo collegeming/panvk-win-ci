@@ -6,12 +6,16 @@ development fork and a context patch would rot faster than these few
 well-delimited changes.  Every missing anchor is reported; the CI build then
 shows the real error.
 """
+import os
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1] if len(sys.argv) > 1 else "mesa")
 changes = 0
 misses = []
+
+# Local anchor validation without touching the tree: the CI never sets this.
+DRY_RUN = os.environ.get("PATCH_MESA_DRY_RUN") == "1"
 
 
 def sub(rel, old, new, count=1, required=True):
@@ -25,9 +29,36 @@ def sub(rel, old, new, count=1, required=True):
         misses.append(f"{rel}: anchor missing: {old[:70]!r}")
         return False
     s = s.replace(old, new, count)
-    p.write_text(s, encoding="utf-8", errors="surrogateescape")
+    if not DRY_RUN:
+        p.write_text(s, encoding="utf-8", errors="surrogateescape")
     changes += 1
     return True
+
+
+def sub_idem(rel, old, new, count=1):
+    """sub() that tolerates a tree where this edit is already present.
+
+    Re-running patch_mesa.py on an already patched tree must not apply an
+    edit twice, but a tree where neither the anchor nor the result exists is
+    still a hard miss: that means the Mesa branch drifted and the edit needs
+    review, not a silent skip.
+    """
+    global changes
+    p = root / rel
+    if not p.exists():
+        misses.append(f"{rel}: file missing")
+        return False
+    s = p.read_text(encoding="utf-8", errors="surrogateescape")
+    if old in s:
+        s = s.replace(old, new, count)
+        if not DRY_RUN:
+            p.write_text(s, encoding="utf-8", errors="surrogateescape")
+        changes += 1
+        return True
+    if new in s:
+        return True
+    misses.append(f"{rel}: anchor missing: {old[:70]!r}")
+    return False
 
 
 def wrap(rel, start_marker, end_marker, before):
@@ -43,7 +74,8 @@ def wrap(rel, start_marker, end_marker, before):
         misses.append(f"{rel}: wrap markers missing")
         return False
     s = s[:a] + before + s[a:b] + "#endif\n\n" + s[b:]
-    p.write_text(s, encoding="utf-8", errors="surrogateescape")
+    if not DRY_RUN:
+        p.write_text(s, encoding="utf-8", errors="surrogateescape")
     changes += 1
     return True
 
@@ -61,7 +93,8 @@ def create(rel, content):
         misses.append(f"{rel}: exists with unexpected content")
         return False
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8", errors="surrogateescape")
+    if not DRY_RUN:
+        p.write_text(content, encoding="utf-8", errors="surrogateescape")
     changes += 1
     return True
 
@@ -1075,6 +1108,591 @@ sub("src/panfrost/lib/kmod/kbase_kmod.c",
 sub("src/panfrost/lib/kmod/kbase_kmod.c",
     "fcntl(kbase_bo->dmabuf_fd, F_DUPFD_CLOEXEC, 3)",
     "_dup(kbase_bo->dmabuf_fd)")
+
+# --------------------------------------------------------------------------
+# Win32 KMT external memory + VkD3DDDI runtime allocator (DWM shared
+# textures).  This is Turnip's contract: the D3D UMD chains a private
+# VkD3DDDICallbacks record (sType 4281808695) carrying the adapter LUID and a
+# VkD3DDDIRuntimeAllocator (4281808698) whose alloc/free hooks perform the
+# WDDM allocation.  vkAllocateMemory must route every allocation that carries
+# VkD3DDDICreateResource (4281808696) through those hooks, because only the
+# runtime's pfnAllocateCb mints the hKMResource an application can share.
+# --------------------------------------------------------------------------
+sub_idem("src/panfrost/vulkan/panvk_instance.h",
+    "   uint8_t driver_build_sha[BLAKE3_KEY_LEN];\n"
+    "\n"
+    "   struct {\n"
+    "      struct pan_kmod_allocator allocator;\n"
+    "   } kmod;\n"
+    "};",
+    "   uint8_t driver_build_sha[BLAKE3_KEY_LEN];\n"
+    "\n"
+    "#ifdef _WIN32\n"
+    "   /* D3D UMD runtime allocator, from the private VkD3DDDICallbacks chain on\n"
+    "    * VkInstanceCreateInfo.pNext (Turnip's contract).  The WDDM transport\n"
+    "    * receives these hooks so a shared D3D11 resource is allocated by the\n"
+    "    * runtime's pfnAllocateCb instead of privately by the ICD. */\n"
+    "   void *runtime_alloc_ctx;\n"
+    "   void *runtime_alloc_fn;\n"
+    "   void *runtime_free_fn;\n"
+    "   uint8_t adapter_luid[VK_LUID_SIZE];\n"
+    "   bool adapter_luid_valid;\n"
+    "#endif\n"
+    "\n"
+    "   struct {\n"
+    "      struct pan_kmod_allocator allocator;\n"
+    "   } kmod;\n"
+    "};")
+
+sub_idem("src/panfrost/vulkan/panvk_instance.c",
+    "#if defined(HAVE_PAN_KMOD_KBASE)\n"
+    "#include <limits.h>\n"
+    "#include <stdio.h>\n"
+    "#include <unistd.h>\n"
+    "#endif\n",
+    "#if defined(HAVE_PAN_KMOD_KBASE)\n"
+    "#include <limits.h>\n"
+    "#include <stdio.h>\n"
+    "#include <unistd.h>\n"
+    "#endif\n"
+    "\n"
+    "#ifdef _WIN32\n"
+    "#include <string.h>\n"
+    "#include \"vulkan/util/vk_util.h\"\n"
+    "#include \"kmod/kbase_virtio.h\"\n"
+    "#endif\n")
+
+sub_idem("src/panfrost/vulkan/panvk_instance.c",
+    "   if (!instance)\n"
+    "      return panvk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);\n"
+    "\n"
+    "   struct vk_instance_dispatch_table dispatch_table;\n",
+    "   if (!instance)\n"
+    "      return panvk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);\n"
+    "\n"
+    "#ifdef _WIN32\n"
+    "   /* Read the D3D UMD's private pNext records.  Their sTypes are outside\n"
+    "    * the Vulkan enum, so vk_find_struct_const() cannot see them; the\n"
+    "    * layouts must match include/vulkan_d3dddi.h in the UMD. */\n"
+    "   {\n"
+    "      struct d3dddi_callbacks_prefix {\n"
+    "         VkStructureType sType;\n"
+    "         const void *pNext;\n"
+    "         uint8_t adapter_luid[VK_LUID_SIZE];\n"
+    "      };\n"
+    "      struct d3dddi_runtime_allocator {\n"
+    "         VkStructureType sType;\n"
+    "         const void *pNext;\n"
+    "         void *ctx;\n"
+    "         void *alloc;\n"
+    "         void *free;\n"
+    "      };\n"
+    "\n"
+    "      vk_foreach_struct_const(d3d_sType, ext, pCreateInfo->pNext) {\n"
+    "         if ((uint32_t) d3d_sType == 4281808695u) {\n"
+    "            const struct d3dddi_callbacks_prefix *callbacks = ext;\n"
+    "            memcpy(instance->adapter_luid, callbacks->adapter_luid,\n"
+    "                   VK_LUID_SIZE);\n"
+    "            instance->adapter_luid_valid = true;\n"
+    "         } else if ((uint32_t) d3d_sType == 4281808698u) {\n"
+    "            const struct d3dddi_runtime_allocator *ra = ext;\n"
+    "            /* Both hooks or neither: a half-installed allocator would\n"
+    "             * allocate through the runtime and then leak the resource\n"
+    "             * association the matching free releases. */\n"
+    "            if (ra->alloc && ra->free) {\n"
+    "               instance->runtime_alloc_ctx = ra->ctx;\n"
+    "               instance->runtime_alloc_fn = ra->alloc;\n"
+    "               instance->runtime_free_fn = ra->free;\n"
+    "            }\n"
+    "         }\n"
+    "      }\n"
+    "   }\n"
+    "\n"
+    "   if (instance->runtime_alloc_fn && instance->runtime_free_fn) {\n"
+    "      kbv_set_runtime_allocator(instance->runtime_alloc_ctx,\n"
+    "                                instance->runtime_alloc_fn,\n"
+    "                                instance->runtime_free_fn);\n"
+    "      fprintf(stderr, \"[panvk-win] runtime allocator ctx=%p alloc=%p \"\n"
+    "              \"free=%p luid_valid=%d\\n\",\n"
+    "              instance->runtime_alloc_ctx, instance->runtime_alloc_fn,\n"
+    "              instance->runtime_free_fn, instance->adapter_luid_valid);\n"
+    "      fflush(stderr);\n"
+    "   }\n"
+    "#endif\n"
+    "\n"
+    "   struct vk_instance_dispatch_table dispatch_table;\n")
+
+# Accept OPAQUE_WIN32_KMT without rejecting the allocation.  Routing is done
+# by the private create-resource record below, exactly like Turnip: the export
+# bit alone does not tell us which allocation the runtime must own.
+sub_idem("src/panfrost/vulkan/panvk_device_memory.c",
+    "   if (export_info) {\n"
+    "      if (export_info->handleTypes &\n"
+    "          ~(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT |\n"
+    "            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT))\n"
+    "         return panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);\n"
+    "      else if (export_info->handleTypes)\n"
+    "         can_be_exported = true;\n"
+    "   }\n",
+    "   if (export_info) {\n"
+    "      if (export_info->handleTypes &\n"
+    "          ~(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT |\n"
+    "            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |\n"
+    "            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT))\n"
+    "         return panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);\n"
+    "      else if (export_info->handleTypes)\n"
+    "         can_be_exported = true;\n"
+    "   }\n"
+    "\n"
+    "#ifdef _WIN32\n"
+    "   /* The D3D UMD chains its shared-resource record under\n"
+    "    * VkMemoryDedicatedAllocateInfo (sType 4281808696,\n"
+    "    * VkD3DDDICreateResource).  It is private, so vk_find_struct_const()\n"
+    "    * cannot see it.  hRTResource selects the runtime allocator path. */\n"
+    "   void *win32_hRTResource = NULL;\n"
+    "   vk_foreach_struct_const(d3d_sType, ext, pAllocateInfo->pNext) {\n"
+    "      if ((uint32_t) d3d_sType == 4281808696u) {\n"
+    "         const void *const *fields = ext;\n"
+    "         /* sType, pNext, hRTResource, pCreateResource */\n"
+    "         win32_hRTResource = (void *)(uintptr_t) fields[2];\n"
+    "         break;\n"
+    "      }\n"
+    "   }\n"
+    "\n"
+    "   const VkImportMemoryWin32HandleInfoKHR *w32_info =\n"
+    "      vk_find_struct_const(pAllocateInfo->pNext,\n"
+    "                           IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR);\n"
+    "#endif\n")
+
+sub_idem("src/panfrost/vulkan/panvk_device_memory.c",
+    "      mem->bo = pan_kmod_bo_import(device->kmod.dev, fd_info->fd);\n"
+    "      if (!mem->bo) {\n"
+    "         result = panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);\n"
+    "         goto err_destroy_mem;\n"
+    "      }\n"
+    "   } else {\n",
+    "      mem->bo = pan_kmod_bo_import(device->kmod.dev, fd_info->fd);\n"
+    "      if (!mem->bo) {\n"
+    "         result = panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);\n"
+    "         goto err_destroy_mem;\n"
+    "      }\n"
+    "   }\n"
+    "#ifdef _WIN32\n"
+    "   else if (w32_info && w32_info->handleType) {\n"
+    "      /* Cross-process open of a shared D3D11 texture: adopt the existing\n"
+    "       * D3DKMT allocation on this device.  Unknown handle types must\n"
+    "       * fail: silently allocating private memory would make the two\n"
+    "       * processes composite unrelated pixels. */\n"
+    "      if (w32_info->handleType !=\n"
+    "          VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT) {\n"
+    "         result = panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);\n"
+    "         goto err_destroy_mem;\n"
+    "      }\n"
+    "\n"
+    "      uint64_t imported_size = pAllocateInfo->allocationSize;\n"
+    "      mem->bo = pan_kmod_bo_import_platform(\n"
+    "         device->kmod.dev, (uint32_t)(uintptr_t) w32_info->handle,\n"
+    "         &imported_size);\n"
+    "      if (!mem->bo) {\n"
+    "         result = panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);\n"
+    "         goto err_destroy_mem;\n"
+    "      }\n"
+    "   }\n"
+    "#endif\n"
+    "   else {\n")
+
+sub_idem("src/panfrost/vulkan/panvk_device_memory.c",
+    "      mem->bo = pan_kmod_bo_alloc(device->kmod.dev,\n"
+    "                                  can_be_exported ? NULL : device->kmod.vm,\n"
+    "                                  pAllocateInfo->allocationSize, bo_flags);\n",
+    "#ifdef _WIN32\n"
+    "      if (win32_hRTResource) {\n"
+    "         /* Shared D3D11 resource: only the runtime allocator can mint the\n"
+    "          * hKMResource the application shares.  SHARED_BACKING makes the\n"
+    "          * host import the memfd through udmabuf so the exported blob and\n"
+    "          * the GPU memory are the same pages; there is no exclusive VM\n"
+    "          * because another process may open the resource. */\n"
+    "         mem->bo = pan_kmod_bo_alloc_shared(\n"
+    "            device->kmod.dev, pAllocateInfo->allocationSize,\n"
+    "            bo_flags | PAN_KMOD_BO_FLAG_SHARED_BACKING, win32_hRTResource);\n"
+    "      } else\n"
+    "#endif\n"
+    "      mem->bo = pan_kmod_bo_alloc(device->kmod.dev,\n"
+    "                                  can_be_exported ? NULL : device->kmod.vm,\n"
+    "                                  pAllocateInfo->allocationSize, bo_flags);\n")
+
+# pan_kmod: two optional Windows-only ops.  Keeping them separate from
+# bo_alloc() means no other backend has to grow a D3D parameter.
+sub_idem("src/panfrost/lib/kmod/pan_kmod.h",
+    "   struct pan_kmod_bo *(*bo_alloc)(struct pan_kmod_dev *dev,\n"
+    "                                   struct pan_kmod_vm *exclusive_vm,\n"
+    "                                   uint64_t size, uint32_t flags);\n"
+    "\n"
+    "   /* Free buffer object. */\n",
+    "   struct pan_kmod_bo *(*bo_alloc)(struct pan_kmod_dev *dev,\n"
+    "                                   struct pan_kmod_vm *exclusive_vm,\n"
+    "                                   uint64_t size, uint32_t flags);\n"
+    "\n"
+    "   /* Allocate a buffer object whose backing must become a D3D11 shared\n"
+    "    * resource.  hRTResource is the Direct3D runtime resource handle from\n"
+    "    * VkD3DDDICreateResource; the backend routes the allocation through the\n"
+    "    * runtime allocator the D3D UMD installed.  Optional, Windows only. */\n"
+    "   struct pan_kmod_bo *(*bo_alloc_shared)(struct pan_kmod_dev *dev,\n"
+    "                                          uint64_t size, uint32_t flags,\n"
+    "                                          void *hRTResource);\n"
+    "\n"
+    "   /* Adopt a platform allocation handle (Windows: a D3DKMT allocation).\n"
+    "    * On success *size is the owner's real size, which may exceed the\n"
+    "    * caller's estimate.  Optional, Windows only. */\n"
+    "   struct pan_kmod_bo *(*bo_import_platform)(struct pan_kmod_dev *dev,\n"
+    "                                             uint32_t handle,\n"
+    "                                             uint64_t *size);\n"
+    "\n"
+    "   /* Free buffer object. */\n")
+
+sub_idem("src/panfrost/lib/kmod/pan_kmod.h",
+    "struct pan_kmod_bo *pan_kmod_bo_alloc(struct pan_kmod_dev *dev,\n"
+    "                                      struct pan_kmod_vm *exclusive_vm,\n"
+    "                                      uint64_t size, uint32_t flags);\n",
+    "struct pan_kmod_bo *pan_kmod_bo_alloc(struct pan_kmod_dev *dev,\n"
+    "                                      struct pan_kmod_vm *exclusive_vm,\n"
+    "                                      uint64_t size, uint32_t flags);\n"
+    "\n"
+    "struct pan_kmod_bo *pan_kmod_bo_alloc_shared(struct pan_kmod_dev *dev,\n"
+    "                                             uint64_t size, uint32_t flags,\n"
+    "                                             void *hRTResource);\n"
+    "\n"
+    "struct pan_kmod_bo *pan_kmod_bo_import_platform(struct pan_kmod_dev *dev,\n"
+    "                                                uint32_t handle,\n"
+    "                                                uint64_t *size);\n")
+
+sub_idem("src/panfrost/lib/kmod/pan_kmod.c",
+    "   assert(*slot == NULL);\n"
+    "   *slot = bo;\n"
+    "   return bo;\n"
+    "}\n"
+    "\n"
+    "void\n"
+    "pan_kmod_bo_put(struct pan_kmod_bo *bo)\n",
+    "   assert(*slot == NULL);\n"
+    "   *slot = bo;\n"
+    "   return bo;\n"
+    "}\n"
+    "\n"
+    "struct pan_kmod_bo *\n"
+    "pan_kmod_bo_alloc_shared(struct pan_kmod_dev *dev, uint64_t size,\n"
+    "                         uint32_t flags, void *hRTResource)\n"
+    "{\n"
+    "   struct pan_kmod_bo *bo;\n"
+    "\n"
+    "   if (!dev->ops->bo_alloc_shared)\n"
+    "      return NULL;\n"
+    "\n"
+    "   bo = dev->ops->bo_alloc_shared(dev, size, flags, hRTResource);\n"
+    "   if (!bo)\n"
+    "      return NULL;\n"
+    "\n"
+    "   struct pan_kmod_bo **slot =\n"
+    "      util_sparse_array_get(&dev->handle_to_bo.array, bo->handle);\n"
+    "\n"
+    "   if (!slot) {\n"
+    "      mesa_loge(\"failed to allocate slot in the handle_to_bo array\");\n"
+    "      bo->dev->ops->bo_free(bo);\n"
+    "      return NULL;\n"
+    "   }\n"
+    "\n"
+    "   assert(*slot == NULL);\n"
+    "   *slot = bo;\n"
+    "   return bo;\n"
+    "}\n"
+    "\n"
+    "struct pan_kmod_bo *\n"
+    "pan_kmod_bo_import_platform(struct pan_kmod_dev *dev, uint32_t handle,\n"
+    "                            uint64_t *size)\n"
+    "{\n"
+    "   struct pan_kmod_bo *bo;\n"
+    "\n"
+    "   if (!dev->ops->bo_import_platform)\n"
+    "      return NULL;\n"
+    "\n"
+    "   bo = dev->ops->bo_import_platform(dev, handle, size);\n"
+    "   if (!bo)\n"
+    "      return NULL;\n"
+    "\n"
+    "   struct pan_kmod_bo **slot =\n"
+    "      util_sparse_array_get(&dev->handle_to_bo.array, bo->handle);\n"
+    "\n"
+    "   if (!slot) {\n"
+    "      mesa_loge(\"failed to allocate slot in the handle_to_bo array\");\n"
+    "      bo->dev->ops->bo_free(bo);\n"
+    "      return NULL;\n"
+    "   }\n"
+    "\n"
+    "   assert(*slot == NULL);\n"
+    "   *slot = bo;\n"
+    "   return bo;\n"
+    "}\n"
+    "\n"
+    "void\n"
+    "pan_kmod_bo_put(struct pan_kmod_bo *bo)\n")
+
+# The import path tags the BO with the backend-independent imported flag; fail
+# loudly if a Mesa branch update ever drops it instead of silently using an
+# undefined symbol.
+require("src/panfrost/lib/kmod/pan_kmod.h",
+        "PAN_KMOD_BO_FLAG_IMPORTED = BITFIELD_BIT(4),",
+        "kbase platform import needs PAN_KMOD_BO_FLAG_IMPORTED")
+
+# kbase: the WDDM transport is the only backend that implements the two ops.
+sub_idem("src/panfrost/lib/kmod/kbase_kmod.c",
+    "   /* Whether this is a SAME_VA region (freed by munmap()) or a zone\n"
+    "    * region (freed by KBASE_IOCTL_MEM_FREE). */\n"
+    "   bool same_va;\n"
+    "};\n",
+    "   /* Whether this is a SAME_VA region (freed by munmap()) or a zone\n"
+    "    * region (freed by KBASE_IOCTL_MEM_FREE). */\n"
+    "   bool same_va;\n"
+    "\n"
+    "   /* Adopted from another process/device: bo_free only drops this\n"
+    "    * device's vdrm reference, it never frees the owner's allocation. */\n"
+    "   bool imported;\n"
+    "};\n")
+
+sub_idem("src/panfrost/lib/kmod/kbase_kmod.c",
+    "   return &kbase_bo->base;\n"
+    "\n"
+    "err_free_bo:\n"
+    "   pan_kmod_dev_free(dev, kbase_bo);\n"
+    "   return NULL;\n"
+    "}\n"
+    "\n"
+    "static void\n"
+    "kbase_kmod_bo_free(struct pan_kmod_bo *bo)\n",
+    "   return &kbase_bo->base;\n"
+    "\n"
+    "err_free_bo:\n"
+    "   pan_kmod_dev_free(dev, kbase_bo);\n"
+    "   return NULL;\n"
+    "}\n"
+    "\n"
+    "static struct pan_kmod_bo *\n"
+    "kbase_kmod_bo_alloc_shared(struct pan_kmod_dev *dev, uint64_t size,\n"
+    "                           uint32_t kmod_flags, void *hRTResource)\n"
+    "{\n"
+    "   struct kbase_kmod_dev *kbase_dev =\n"
+    "      container_of(dev, struct kbase_kmod_dev, base);\n"
+    "\n"
+    "   if (!kbv_has(dev->fd)) {\n"
+    "      mesa_loge(\"kbase: shared allocation requires the virtio/WDDM transport\");\n"
+    "      return NULL;\n"
+    "   }\n"
+    "\n"
+    "   /* Round once: GEM_NEW and RESOURCE_CREATE_BLOB must agree exactly, and\n"
+    "    * the runtime allocation repeats this same size back to the KMD. */\n"
+    "   size = (size + 4095) & ~4095ull;\n"
+    "   kmod_flags |= PAN_KMOD_BO_FLAG_WB_MMAP;\n"
+    "   kmod_flags &= ~PAN_KMOD_BO_FLAG_IO_COHERENT;\n"
+    "\n"
+    "   struct kbase_kmod_bo *bo = pan_kmod_dev_alloc(dev, sizeof(*bo));\n"
+    "   if (!bo)\n"
+    "      return NULL;\n"
+    "   bo->dmabuf_fd = -1;\n"
+    "\n"
+    "   uint32_t km_resource = 0;\n"
+    "   if (kbv_bo_alloc_shared(dev->fd, size, to_kbase_mem_flags(kmod_flags),\n"
+    "                           !!(kmod_flags & PAN_KMOD_BO_FLAG_SHARED_BACKING),\n"
+    "                           hRTResource, &bo->virtio_handle, &bo->virtio_gem,\n"
+    "                           &bo->gpu_va, &bo->cpu_ptr, &km_resource)) {\n"
+    "      mesa_loge(\"kbase virtio: shared BO size=%\" PRIu64 \" flags=0x%x failed: %s\",\n"
+    "                size, kmod_flags, strerror(errno));\n"
+    "      pan_kmod_dev_free(dev, bo);\n"
+    "      return NULL;\n"
+    "   }\n"
+    "\n"
+    "   fprintf(stderr, \"[kbv-win] shared BO gpu_va=0x%llx gem=%u kmres=0x%x\\n\",\n"
+    "           (unsigned long long) bo->gpu_va, bo->virtio_gem, km_resource);\n"
+    "   fflush(stderr);\n"
+    "\n"
+    "   uint32_t handle = p_atomic_inc_return(&kbase_dev->next_handle);\n"
+    "   pan_kmod_bo_init(&bo->base, dev, NULL, size, kmod_flags, handle);\n"
+    "   return &bo->base;\n"
+    "}\n"
+    "\n"
+    "static struct pan_kmod_bo *\n"
+    "kbase_kmod_bo_import_platform(struct pan_kmod_dev *dev,\n"
+    "                              uint32_t platform_handle, uint64_t *size)\n"
+    "{\n"
+    "   struct kbase_kmod_dev *kbase_dev =\n"
+    "      container_of(dev, struct kbase_kmod_dev, base);\n"
+    "\n"
+    "   if (!kbv_has(dev->fd))\n"
+    "      return NULL;\n"
+    "\n"
+    "   struct kbase_kmod_bo *bo = pan_kmod_dev_alloc(dev, sizeof(*bo));\n"
+    "   if (!bo)\n"
+    "      return NULL;\n"
+    "   bo->dmabuf_fd = -1;\n"
+    "\n"
+    "   uint64_t real_size = size ? *size : 0;\n"
+    "   if (kbv_bo_open_platform(dev->fd, platform_handle, &real_size,\n"
+    "                            &bo->virtio_gem, &bo->gpu_va, &bo->cpu_ptr)) {\n"
+    "      mesa_loge(\"kbase virtio: platform import handle=0x%x failed: %s\",\n"
+    "                platform_handle, strerror(errno));\n"
+    "      pan_kmod_dev_free(dev, bo);\n"
+    "      return NULL;\n"
+    "   }\n"
+    "\n"
+    "   /* No kbv RPC handle: this allocation belongs to another process. */\n"
+    "   bo->virtio_handle = 0;\n"
+    "   bo->imported = true;\n"
+    "\n"
+    "   /* The host has no GEM_SET_IOVA equivalent (its command set is KB_*),\n"
+    "    * so an imported resource currently has no VA in this context.  Allow a\n"
+    "    * diagnostic override to prove whether the kbase VA space is shared;\n"
+    "    * without it the BO would be bound at address 0. */\n"
+    "   {\n"
+    "      const char *va_env = getenv(\"PANVK_WIN_IMPORT_VA\");\n"
+    "      if (va_env && va_env[0])\n"
+    "         bo->gpu_va = strtoull(va_env, NULL, 0);\n"
+    "   }\n"
+    "   fprintf(stderr, \"[kbv-win] imported KMT 0x%x gpu_va=0x%llx gem=%u\\n\",\n"
+    "           platform_handle, (unsigned long long) bo->gpu_va, bo->virtio_gem);\n"
+    "   fflush(stderr);\n"
+    "\n"
+    "   uint32_t handle = p_atomic_inc_return(&kbase_dev->next_handle);\n"
+    "   pan_kmod_bo_init(&bo->base, dev, NULL, real_size,\n"
+    "                    PAN_KMOD_BO_FLAG_IMPORTED, handle);\n"
+    "   if (size)\n"
+    "      *size = real_size;\n"
+    "   return &bo->base;\n"
+    "}\n"
+    "\n"
+    "static void\n"
+    "kbase_kmod_bo_free(struct pan_kmod_bo *bo)\n")
+
+sub_idem("src/panfrost/lib/kmod/kbase_kmod.c",
+    "   pan_kmod_bo_cleanup(bo);\n"
+    "   if (kbase_bo->virtio_handle) {\n",
+    "   pan_kmod_bo_cleanup(bo);\n"
+    "   if (kbase_bo->imported) {\n"
+    "      /* Only drop this device's reference; the owner still holds the\n"
+    "       * allocation and its host resource. */\n"
+    "      kbv_bo_close_platform(bo->dev->fd, kbase_bo->virtio_gem);\n"
+    "      pan_kmod_dev_free(bo->dev, kbase_bo);\n"
+    "      return;\n"
+    "   }\n"
+    "   if (kbase_bo->virtio_handle) {\n")
+
+sub_idem("src/panfrost/lib/kmod/kbase_kmod.c",
+    "   .bo_alloc               = kbase_kmod_bo_alloc,\n"
+    "   .bo_free                = kbase_kmod_bo_free,\n",
+    "   .bo_alloc               = kbase_kmod_bo_alloc,\n"
+    "   .bo_alloc_shared        = kbase_kmod_bo_alloc_shared,\n"
+    "   .bo_import_platform     = kbase_kmod_bo_import_platform,\n"
+    "   .bo_free                = kbase_kmod_bo_free,\n")
+
+# The kbv shim implements these; panvk_device_memory.c includes the forwarding
+# header (vendor/mesa-overlay/kbase_virtio.h) that pulls this one in.
+sub_idem("src/panfrost/lib/kmod/mali_kbase_virtio.h",
+    "int kbv_bo_alloc(int fd, uint64_t size, uint64_t flags, bool shared, uint32_t *handle,\n"
+    "                 uint32_t *gem, uint64_t *gpu_va, void **map);\n",
+    "int kbv_bo_alloc(int fd, uint64_t size, uint64_t flags, bool shared, uint32_t *handle,\n"
+    "                 uint32_t *gem, uint64_t *gpu_va, void **map);\n"
+    "void kbv_set_runtime_allocator(void *ctx, void *alloc, void *free);\n"
+    "int kbv_bo_alloc_shared(int fd, uint64_t size, uint64_t flags, bool shared,\n"
+    "                        void *hRTResource, uint32_t *handle, uint32_t *gem,\n"
+    "                        uint64_t *gpu_va, void **map, uint32_t *km_resource);\n"
+    "int kbv_bo_open_platform(int fd, uint32_t kmt_handle, uint64_t *size,\n"
+    "                         uint32_t *gem, uint64_t *gpu_va, void **map);\n"
+    "void kbv_bo_close_platform(int fd, uint32_t gem);\n")
+
+# Report the KMD adapter LUID the UMD passed in.  Off by default: reporting a
+# LUID changes how the loader and DXVK enumerate adapters, and the D3D path is
+# not ready to depend on it.  PANVK_WIN_ADAPTER_LUID=1 enables it for A/B.
+sub_idem("src/panfrost/vulkan/panvk_physical_device.c",
+    "   panvk_arch_dispatch(arch, get_physical_device_properties, instance, device,\n"
+    "                       &device->vk.properties);\n"
+    "\n"
+    "   device->vk.supported_sync_types = device->sync_types;\n",
+    "   panvk_arch_dispatch(arch, get_physical_device_properties, instance, device,\n"
+    "                       &device->vk.properties);\n"
+    "\n"
+    "#ifdef _WIN32\n"
+    "   {\n"
+    "      const bool report_luid = getenv(\"PANVK_WIN_ADAPTER_LUID\") != NULL;\n"
+    "      if (report_luid && instance->adapter_luid_valid) {\n"
+    "         memcpy(device->vk.properties.deviceLUID, instance->adapter_luid,\n"
+    "                VK_LUID_SIZE);\n"
+    "         device->vk.properties.deviceNodeMask = 1;\n"
+    "         device->vk.properties.deviceLUIDValid = true;\n"
+    "      }\n"
+    "      fprintf(stderr, \"[panvk-win] adapter LUID %s (valid=%d)\\n\",\n"
+    "              report_luid ? \"reported\" : \"withheld\",\n"
+    "              instance->adapter_luid_valid);\n"
+    "      fflush(stderr);\n"
+    "   }\n"
+    "#endif\n"
+    "\n"
+    "   device->vk.supported_sync_types = device->sync_types;\n")
+
+# --------------------------------------------------------------------------
+# Push constants: formal fix for the DWM/DXVK shaders that mix direct
+# load_push_constant with pushable UBOs.  Both live in the FAU word file, but
+# they do not overlap: direct loads use [0, fau->reserved) (the driver sized
+# that region for sysvals + push constants) and bi_opt_push_ubo() allocates
+# relocations starting at fau->count, which bifrost_nir.c initializes to
+# fau->reserved.  The old assert rejected every such shader outright; the
+# bound below is the invariant that actually matters and stays enforced.
+# --------------------------------------------------------------------------
+sub_idem("src/panfrost/compiler/bifrost/bifrost_compile.c",
+    "   assert(!b->shader->inputs->fau.pushable_ubos &&\n"
+    "          \"can't mix push constant forms\");\n"
+    "\n"
+    "   nir_src *offset = &instr->src[0];\n",
+    "   /* Direct push constants and pushable UBOs share the FAU file without\n"
+    "    * overlapping: the former occupy the reserved region, the latter are\n"
+    "    * allocated after it.  See bi_opt_push_ubo(). */\n"
+    "   nir_src *offset = &instr->src[0];\n")
+
+require("src/panfrost/compiler/bifrost/bifrost_compile.c",
+        "   assert((base / 4) + n <= fau->reserved);",
+        "push-constant FAU bound must stay enforced")
+
+sub_idem("src/panfrost/compiler/bifrost/bi_opt_push_ubo.c",
+    "   struct pan_fau_layout *fau = ctx->info.fau;\n"
+    "   const bool handles = ctx->inputs->fau.push_ubo_handles;\n"
+    "\n"
+    "   /* We first pick the blend constants, those cannot be reordered */\n",
+    "   struct pan_fau_layout *fau = ctx->info.fau;\n"
+    "   const bool handles = ctx->inputs->fau.push_ubo_handles;\n"
+    "\n"
+    "   /* The reserved region belongs to sysvals/direct push constants; UBO\n"
+    "    * relocations must start after it or the two forms would alias. */\n"
+    "   assert(fau->count >= fau->reserved);\n"
+    "\n"
+    "   /* We first pick the blend constants, those cannot be reordered */\n")
+
+# Diagnostic: a failing init_kbase makes vkEnumeratePhysicalDevices return an
+# error (DXVK then aborts with "Failed to enumerate adapters"), and DWM has no
+# usable stderr.  Leave a breadcrumb the guest-side test can read.
+sub_idem("src/panfrost/vulkan/panvk_instance.c",
+    "   if (result != VK_SUCCESS) {\n"
+    "      vk_free(&instance->vk.alloc, device);\n"
+    "      if (result == VK_ERROR_INCOMPATIBLE_DRIVER)\n"
+    "         return VK_SUCCESS; /* no virtio WDDM adapter: zero devices */\n"
+    "      return result;\n"
+    "   }\n",
+    "   if (result != VK_SUCCESS) {\n"
+    "      FILE *f = fopen(\"C:\\\\panvk\\\\panvk_icd.log\", \"a\");\n"
+    "      if (f) {\n"
+    "         fprintf(f, \"enumerate: init_kbase -> %d\\n\", (int) result);\n"
+    "         fclose(f);\n"
+    "      }\n"
+    "      vk_free(&instance->vk.alloc, device);\n"
+    "      if (result == VK_ERROR_INCOMPATIBLE_DRIVER)\n"
+    "         return VK_SUCCESS; /* no virtio WDDM adapter: zero devices */\n"
+    "      return result;\n"
+    "   }\n")
 
 print(f"patch_mesa: {changes} edits applied, {len(misses)} anchors missing")
 for m in misses:

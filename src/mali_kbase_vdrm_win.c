@@ -19,6 +19,10 @@
 #include <string.h>
 #include <sys/ioctl.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "util/simple_mtx.h"
 #include "vdrm.h"
 #include "drm-uapi/panthor_drm.h"
@@ -46,11 +50,42 @@ struct kbv_ctx {
    int error;
    uint32_t gem, seqno, rsp_off;
    struct vdrm_device *vdev;
-   struct { uint32_t handle; uint32_t gem; void *ptr; uint64_t size; } bo[1024];
+   struct {
+      uint32_t handle;
+      uint32_t gem;
+      uint32_t km_resource;   /* runtime-owned BO only; 0 otherwise */
+      void *ptr;
+      uint64_t size;
+      bool used;
+      bool imported;          /* opened from another device; never freed here */
+   } bo[1024];
    struct { uint32_t gem; uint64_t va; void *ptr; } queue[32];
 };
 static struct kbv_ctx contexts[16];
 static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
+
+/* The D3D UMD's runtime allocator (VkD3DDDIRuntimeAllocator), installed by
+ * panvk_CreateInstance() before any device is created.  Every vdrm context
+ * connected afterwards gets the same hooks.  A process has one D3D runtime
+ * device, and only allocations that carry VkD3DDDICreateResource are routed
+ * through it, so one slot is enough; the last instance wins. */
+static struct {
+   void *ctx;
+   void *alloc;
+   void *free;
+} runtime_allocator;
+
+void kbv_set_runtime_allocator(void *ctx, void *alloc, void *free)
+{
+   simple_mtx_lock(&lock);
+   runtime_allocator.ctx = ctx;
+   runtime_allocator.alloc = alloc;
+   runtime_allocator.free = free;
+   simple_mtx_unlock(&lock);
+   fprintf(stderr, "[kbv-win] runtime allocator set ctx=%p alloc=%p free=%p\n",
+           ctx, alloc, free);
+   fflush(stderr);
+}
 
 static struct kbv_ctx *lookup(int fd)
 {
@@ -99,7 +134,20 @@ int kbv_init(int fd, uint16_t *major, uint16_t *minor)
    fflush(stderr);
    _putenv_s("VDRM_WDDM_DEBUG", "1");
    errno = 0;
-   struct vdrm_device *vdev = vdrm_device_connect(-1, KBV_CONTEXT_TYPE);
+   /* The KMD can return STATUS_PENDING from ContextInit while a freshly
+    * created device is still starting; the following ring CreateAllocation
+    * then fails with STATUS_REINITIALIZATION_NEEDED (no context) and the
+    * whole connect is lost.  Destroying and reconnecting a moment later
+    * succeeds, so retry here instead of failing the Vulkan device. */
+   struct vdrm_device *vdev = NULL;
+   for (int attempt = 0; attempt < 10 && !vdev; attempt++) {
+      if (attempt) {
+         fprintf(stderr, "[kbv-win] vdrm_device_connect retry %d\n", attempt);
+         fflush(stderr);
+         Sleep(200);
+      }
+      vdev = vdrm_device_connect(-1, KBV_CONTEXT_TYPE);
+   }
    if (!vdev) {
       fprintf(stderr, "[kbv-win] vdrm_device_connect FAILED errno=%d (%s)\n",
               errno, strerror(errno));
@@ -123,6 +171,22 @@ int kbv_init(int fd, uint16_t *major, uint16_t *minor)
       vdrm_device_close(vdev);
       errno = EPROTO;
       return -1;
+   }
+
+   /* The D3D UMD installs its runtime allocator on the VkInstance, which is
+    * created before any device; every vdrm context must carry the hooks so a
+    * shared allocation made on either the probe or the logical device can be
+    * routed through pfnAllocateCb. */
+   simple_mtx_lock(&lock);
+   void *ra_ctx = runtime_allocator.ctx;
+   void *ra_alloc = runtime_allocator.alloc;
+   void *ra_free = runtime_allocator.free;
+   simple_mtx_unlock(&lock);
+   if (ra_alloc && ra_free) {
+      vdrm_wddm_set_runtime_allocator(vdev, ra_ctx, ra_alloc, ra_free);
+      fprintf(stderr, "[kbv-win] runtime allocator installed on vdev=%p\n",
+              (void *)vdev);
+      fflush(stderr);
    }
 
    simple_mtx_lock(&lock);
@@ -255,12 +319,15 @@ int kbv_bo_alloc(int fd, uint64_t size, uint64_t flags, bool shared, uint32_t *h
    simple_mtx_lock(&lock);
    ctx = lookup(fd);
    unsigned slot;
-   for (slot = 0; ctx && slot < 1024 && ctx->bo[slot].ptr; slot++);
+   for (slot = 0; ctx && slot < 1024 && ctx->bo[slot].used; slot++);
    if (ctx && slot < 1024) {
       ctx->bo[slot].handle = *handle;
       ctx->bo[slot].gem = vgem;
+      ctx->bo[slot].km_resource = 0;
       ctx->bo[slot].ptr = ptr;
       ctx->bo[slot].size = size;
+      ctx->bo[slot].used = true;
+      ctx->bo[slot].imported = false;
    }
    simple_mtx_unlock(&lock);
    if (!ctx || slot >= 1024) {
@@ -285,7 +352,11 @@ void kbv_bo_free(int fd, uint32_t handle, uint32_t gem, void *map, uint64_t size
    struct kbv_ctx *ctx = lookup(fd);
    struct vdrm_device *vdev = ctx ? ctx->vdev : NULL;
    if (ctx) for (unsigned i = 0; i < 1024; i++)
-      if (ctx->bo[i].ptr == map) memset(&ctx->bo[i], 0, sizeof(ctx->bo[i]));
+      if (ctx->bo[i].used &&
+          (ctx->bo[i].handle == handle || (map && ctx->bo[i].ptr == map))) {
+         memset(&ctx->bo[i], 0, sizeof(ctx->bo[i]));
+         break;
+      }
    simple_mtx_unlock(&lock);
    if (vdev) {
       if (gem) vdrm_bo_close(vdev, gem);
@@ -293,6 +364,160 @@ void kbv_bo_free(int fd, uint32_t handle, uint32_t gem, void *map, uint64_t size
    struct kbv_req q = { .cmd = 4, .handle = handle };
    struct kbv_rsp r;
    rpc(fd, &q, &r);
+}
+
+/* Shared (runtime-allocated) BO: the kbv protocol is unchanged, but the WDDM
+ * allocation is made by the D3D UMD's runtime allocator so the result can
+ * become a D3D11 shared resource.  The blob identity still comes from cmd 11:
+ * the host creates the memfd-backed BO that RESOURCE_CREATE_BLOB attaches, and
+ * the runtime allocation is a second reference to that same backing.
+ */
+int kbv_bo_alloc_shared(int fd, uint64_t size, uint64_t flags, bool shared,
+                        void *hRTResource, uint32_t *handle, uint32_t *gem,
+                        uint64_t *gpu_va, void **map, uint32_t *km_resource)
+{
+   if (size > UINT32_MAX || flags > UINT32_MAX) { errno = EOVERFLOW; return -1; }
+   struct kbv_req q = { .cmd = 11, .size = size, .handle = flags, .reserved = shared };
+   struct kbv_rsp r;
+   if (rpc(fd, &q, &r)) return -1;
+   *handle = r.handle;
+   *gpu_va = r.value;
+   if (km_resource) *km_resource = 0;
+
+   struct vdrm_ccmd_req dummy = { 0 };
+   simple_mtx_lock(&lock);
+   struct kbv_ctx *ctx = lookup(fd);
+   struct vdrm_device *vdev = ctx ? ctx->vdev : NULL;
+   simple_mtx_unlock(&lock);
+   if (!vdev) { errno = ENODEV; return -1; }
+
+   /* Exactly VIRGL_RENDERER_BLOB_FLAG_USE_MAPPABLE: the host's get_blob()
+    * rejects any other flag value. */
+   uint32_t vgem = vdrm_bo_create_shared(vdev, size, KBV_BLOB_MAPPABLE,
+                                         r.handle, 0, &dummy, hRTResource,
+                                         km_resource);
+   if (!vgem) {
+      fprintf(stderr, "[kbv-win] shared blob id=%u size=%llu: "
+              "vdrm_bo_create_shared failed\n",
+              r.handle, (unsigned long long)size);
+      fflush(stderr);
+      errno = EIO;
+      goto fail;
+   }
+   /* Deliberately not mapped: a shared texture is GPU-only, and a BlobMap
+    * left registered across a virtio-gpu reset makes crosvm fault on the
+    * guest GPA (VirtioGpu::reset() drops resources without unmapping).
+    * DWM creates dozens of shared blobs per session, so eager maps here
+    * turn a display restart into a vcpu EFAULT.  CPU access, if a future
+    * caller needs it, must go through a lazy kbv_bo_map().
+    */
+   simple_mtx_lock(&lock);
+   ctx = lookup(fd);
+   unsigned slot;
+   for (slot = 0; ctx && slot < 1024 && ctx->bo[slot].used; slot++);
+   if (ctx && slot < 1024) {
+      ctx->bo[slot].handle = *handle;
+      ctx->bo[slot].gem = vgem;
+      ctx->bo[slot].km_resource = km_resource ? *km_resource : 0;
+      ctx->bo[slot].ptr = NULL;
+      ctx->bo[slot].size = size;
+      ctx->bo[slot].used = true;
+      ctx->bo[slot].imported = false;
+   }
+   simple_mtx_unlock(&lock);
+   if (!ctx || slot >= 1024) {
+      vdrm_bo_close(vdev, vgem);
+      errno = ENOSPC;
+      return -1;
+   }
+   fprintf(stderr, "[kbv-win] shared BO blob=%u size=%llu kmres=0x%x gem=%u "
+           "(not mapped)\n",
+           *handle, (unsigned long long)size,
+           km_resource ? *km_resource : 0, vgem);
+   fflush(stderr);
+   *gem = vgem;
+   *map = NULL;
+   return 0;
+
+fail:
+   q = (struct kbv_req){ .cmd = 4, .handle = *handle };
+   rpc(fd, &q, &r);
+   return -1;
+}
+
+/* Open a D3DKMT allocation that belongs to another process/device.  vdrm
+ * creates a device-local reference to the same backing; nothing is mapped
+ * here because the KMD allows one BlobMap per blob and the owner may hold it.
+ */
+int kbv_bo_open_platform(int fd, uint32_t kmt_handle, uint64_t *size,
+                         uint32_t *gem, uint64_t *gpu_va, void **map)
+{
+   simple_mtx_lock(&lock);
+   struct kbv_ctx *ctx = lookup(fd);
+   struct vdrm_device *vdev = ctx ? ctx->vdev : NULL;
+   simple_mtx_unlock(&lock);
+   if (!vdev) { errno = ENODEV; return -1; }
+
+   uint64_t real_size = 0;
+   uint32_t vgem = vdrm_alloc_to_handle(vdev, kmt_handle, &real_size);
+   if (!vgem) {
+      fprintf(stderr, "[kbv-win] open KMT 0x%x: vdrm_alloc_to_handle failed\n",
+              kmt_handle);
+      fflush(stderr);
+      errno = EINVAL;
+      return -1;
+   }
+   if (size && *size && real_size < *size) {
+      vdrm_bo_close(vdev, vgem);
+      errno = EINVAL;
+      return -1;
+   }
+
+   *map = NULL;
+   *gpu_va = 0;
+   *gem = vgem;
+
+   simple_mtx_lock(&lock);
+   ctx = lookup(fd);
+   unsigned slot;
+   for (slot = 0; ctx && slot < 1024 && ctx->bo[slot].used; slot++);
+   if (ctx && slot < 1024) {
+      ctx->bo[slot].handle = 0;
+      ctx->bo[slot].gem = vgem;
+      ctx->bo[slot].km_resource = 0;
+      ctx->bo[slot].ptr = NULL;
+      ctx->bo[slot].size = real_size;
+      ctx->bo[slot].used = true;
+      ctx->bo[slot].imported = true;
+   }
+   simple_mtx_unlock(&lock);
+   if (!ctx || slot >= 1024) {
+      vdrm_bo_close(vdev, vgem);
+      errno = ENOSPC;
+      return -1;
+   }
+   if (size) *size = real_size;
+   fprintf(stderr, "[kbv-win] imported KMT 0x%x size=%llu gem=%u\n",
+           kmt_handle, (unsigned long long)real_size, vgem);
+   fflush(stderr);
+   return 0;
+}
+
+/* Release a platform import.  Never sends cmd 4: the allocation belongs to the
+ * process that created it, and vdrm_bo_close only drops our device-local
+ * reference (the KMD's imported table entry is not destroyed). */
+void kbv_bo_close_platform(int fd, uint32_t gem)
+{
+   simple_mtx_lock(&lock);
+   struct kbv_ctx *ctx = lookup(fd);
+   struct vdrm_device *vdev = ctx ? ctx->vdev : NULL;
+   if (ctx) for (unsigned i = 0; i < 1024; i++)
+      if (ctx->bo[i].used && ctx->bo[i].gem == gem) {
+         memset(&ctx->bo[i], 0, sizeof(ctx->bo[i]));
+         break;
+      }
+   simple_mtx_unlock(&lock);
+   if (vdev && gem) vdrm_bo_close(vdev, gem);
 }
 
 int kbv_bo_sync(int fd, uint32_t handle, uint64_t offset, uint64_t size, uint8_t type)
