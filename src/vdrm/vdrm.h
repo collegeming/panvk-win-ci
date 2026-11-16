@@ -57,7 +57,7 @@ struct vdrm_device_funcs {
     * destroying it.  Optional; NULL on backends without a notion of externally
     * owned allocations (see vdrm_alloc_to_handle). */
    uint32_t (*alloc_to_handle)(struct vdrm_device *vdev, uint32_t platform_handle,
-                               uint64_t *size);
+                               uint64_t *size, uint64_t *gpu_va);
 
    uint32_t (*bo_create)(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
                          uint64_t blob_id, uint32_t blob_hints,
@@ -175,15 +175,17 @@ vdrm_handle_to_res_id(struct vdrm_device *vdev, uint32_t handle)
  * Adopt an externally owned platform allocation, returning a vdrm BO handle.
  * On success *size receives the allocation's size as the platform reports it,
  * which the caller must use instead of its own estimate (the owner may have
- * rounded up).  Returns 0 if unsupported by this backend or on failure.
+ * rounded up).  *gpu_va receives the per-context GPU virtual address of the
+ * adopted backing, or 0 when the backend cannot map it into this context.
+ * Returns 0 if unsupported by this backend or on failure.
  */
 static inline uint32_t
 vdrm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
-                     uint64_t *size)
+                     uint64_t *size, uint64_t *gpu_va)
 {
    if (!vdev->funcs->alloc_to_handle)
       return 0;
-   return vdev->funcs->alloc_to_handle(vdev, platform_handle, size);
+   return vdev->funcs->alloc_to_handle(vdev, platform_handle, size, gpu_va);
 }
 
 uint32_t vdrm_bo_create(struct vdrm_device *vdev, size_t size,

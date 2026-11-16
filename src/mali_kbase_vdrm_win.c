@@ -459,7 +459,9 @@ int kbv_bo_open_platform(int fd, uint32_t kmt_handle, uint64_t *size,
    if (!vdev) { errno = ENODEV; return -1; }
 
    uint64_t real_size = 0;
-   uint32_t vgem = vdrm_alloc_to_handle(vdev, kmt_handle, &real_size);
+   uint64_t real_va = 0;
+   uint32_t vgem = vdrm_alloc_to_handle(vdev, kmt_handle, &real_size,
+                                        &real_va);
    if (!vgem) {
       fprintf(stderr, "[kbv-win] open KMT 0x%x: vdrm_alloc_to_handle failed\n",
               kmt_handle);
@@ -474,7 +476,7 @@ int kbv_bo_open_platform(int fd, uint32_t kmt_handle, uint64_t *size,
    }
 
    *map = NULL;
-   *gpu_va = 0;
+   *gpu_va = real_va;
    *gem = vgem;
 
    simple_mtx_lock(&lock);
@@ -497,8 +499,9 @@ int kbv_bo_open_platform(int fd, uint32_t kmt_handle, uint64_t *size,
       return -1;
    }
    if (size) *size = real_size;
-   fprintf(stderr, "[kbv-win] imported KMT 0x%x size=%llu gem=%u\n",
-           kmt_handle, (unsigned long long)real_size, vgem);
+   fprintf(stderr, "[kbv-win] imported KMT 0x%x size=%llu gem=%u va=0x%llx\n",
+           kmt_handle, (unsigned long long)real_size, vgem,
+           (unsigned long long)real_va);
    fflush(stderr);
    return 0;
 }
