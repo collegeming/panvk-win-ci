@@ -32,8 +32,8 @@ jobs:
           python3 -m pip install --break-system-packages meson
       - name: Mesa source
         run: |
-          git clone --depth 1 --branch feature/mali-kbase-native-context \
-            https://github.com/MollySophia/mesa-manet mesa
+          git clone --depth 1 --branch feat/icd-sync-dsotsin-20261119 \
+            https://github.com/collegeming/mesa-manet mesa
       - name: Configure
         run: |
           meson setup build mesa -Dbuildtype=release \
@@ -107,8 +107,8 @@ jobs:
       - name: Mesa source and patches
         shell: pwsh
         run: |
-          git clone --depth 1 --branch feature/mali-kbase-native-context `
-            https://github.com/MollySophia/mesa-manet mesa
+          git clone --depth 1 --branch feat/icd-sync-dsotsin-20261119 `
+            https://github.com/collegeming/mesa-manet mesa
           Copy-Item -Recurse vendor\win32-compat mesa\include\win32-compat
           Copy-Item vendor\mesa-overlay\kbase_virtio.h mesa\src\panfrost\lib\kmod\kbase_virtio.h
           Copy-Item vendor\mesa-overlay\panvk_win_rt_stubs.c mesa\src\panfrost\vulkan\panvk_win_rt_stubs.c
