@@ -61,6 +61,36 @@ def sub_idem(rel, old, new, count=1):
     return False
 
 
+def sub_idem_either(rel, variants):
+    """sub_idem over alternative anchors for the same logical edit.
+
+    The upstream manet line (feat/icd-sync-dsotsin-20261119 and its
+    descendants) rewrote the panvk_AllocateMemory allocation call from
+    pan_kmod_bo_alloc() to pan_kmod_bo_alloc_at(); the old line still has
+    the original form.  The same win32_hRTResource routing must be inserted
+    before either shape.  A tree that has none of the anchors and none of
+    the results is still a hard miss.
+    """
+    p = root / rel
+    if not p.exists():
+        misses.append(f"{rel}: file missing")
+        return False
+    s = p.read_text(encoding="utf-8", errors="surrogateescape")
+    for old, new in variants:
+        if new in s:
+            return True
+    for old, new in variants:
+        if old in s:
+            s = s.replace(old, new, 1)
+            if not DRY_RUN:
+                p.write_text(s, encoding="utf-8", errors="surrogateescape")
+            global changes
+            changes += 1
+            return True
+    misses.append(f"{rel}: anchor missing: {variants[0][0][:70]!r}")
+    return False
+
+
 def wrap(rel, start_marker, end_marker, before):
     global changes
     p = root / rel
@@ -129,15 +159,40 @@ sub("meson.build",
     "with_bvh = with_amd_vk or with_intel_vk or with_swrast_vk or with_freedreno_vk or with_panfrost_vk",
     "with_bvh = (with_amd_vk or with_intel_vk or with_swrast_vk or with_freedreno_vk or with_panfrost_vk) and host_machine.system() != 'windows'")
 
-sub("src/panfrost/vulkan/meson.build",
-    "subdir('bvh')\n\nrt_archs = [15]",
-    "if host_machine.system() != 'windows'\n"
-    "  subdir('bvh')\n"
-    "  rt_archs = [15]\n"
-    "else\n"
-    "  panvk_bvh_spv = []\n"
-    "  rt_archs = []\n"
-    "endif")
+sub_idem_either("src/panfrost/vulkan/meson.build", [
+    # Variant A: the original manet tree (no bcn/ yet).
+    (
+        "subdir('bvh')\n\nrt_archs = [15]",
+        "if host_machine.system() != 'windows'\n"
+        "  subdir('bvh')\n"
+        "  rt_archs = [15]\n"
+        "else\n"
+        "  panvk_bvh_spv = []\n"
+        "  rt_archs = []\n"
+        "endif"
+    ),
+    # Variant B: the icd-sync port adds vulkan/bcn (BCn decode + raw block
+    # copies).  Its custom_targets need glslang, which the Windows runner
+    # does not have; the libpan job pre-bakes the same -x headers and the
+    # panvk job drops them into vulkan/bcn/ before patching.  Point the
+    # panvk_bcn_*_spv variables at those static files so panvk_vX_bc_emu.c
+    # and panvk_vX_copy_blocks.c build unchanged.
+    (
+        "subdir('bvh')\nsubdir('bcn')\n\nrt_archs = [15]",
+        "if host_machine.system() != 'windows'\n"
+        "  subdir('bvh')\n"
+        "  subdir('bcn')\n"
+        "  rt_archs = [15]\n"
+        "else\n"
+        "  panvk_bvh_spv = []\n"
+        "  panvk_bcn_spv = files('bcn/decode.spv.h')\n"
+        "  panvk_bcn_3d_spv = files('bcn/decode_3d.spv.h')\n"
+        "  panvk_bcn_astc_spv = files('bcn/encode_astc.spv.h')\n"
+        "  panvk_copy_blocks_spv = files('bcn/copy_blocks.spv.h')\n"
+        "  rt_archs = []\n"
+        "endif"
+    ),
+])
 
 sub("src/panfrost/vulkan/meson.build",
     "  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],",
@@ -924,15 +979,29 @@ sub("src/panfrost/vulkan/panvk_physical_device.c",
     "   configure_kbase_dvfs(path);",
     "#ifndef _WIN32\n   configure_kbase_dvfs(path);\n#endif")
 
-sub("src/panfrost/vulkan/panvk_physical_device.c",
-    "   case 6:\n   case 7:\n   case 14:\n   case 15:\n"
-    "      if (!os_get_option(\"PAN_I_WANT_A_BROKEN_VULKAN_DRIVER\")) {",
-    "   case 6:\n   case 7:\n   case 14:\n   case 15:\n"
-    "#ifdef _WIN32\n"
-    "      /* G2-Ultra (arch 15) is the validated native-context target. */\n"
-    "      break;\n"
-    "#endif\n"
-    "      if (!os_get_option(\"PAN_I_WANT_A_BROKEN_VULKAN_DRIVER\")) {")
+sub_idem_either("src/panfrost/vulkan/panvk_physical_device.c", [
+    # Variant A: the original manet kbase init warned for arch 15 too; the
+    # Windows transport targets exactly that G2-Ultra (arch 15) device.
+    (
+        "   case 6:\n   case 7:\n   case 14:\n   case 15:\n"
+        "      if (!os_get_option(\"PAN_I_WANT_A_BROKEN_VULKAN_DRIVER\")) {",
+        "   case 6:\n   case 7:\n   case 14:\n   case 15:\n"
+        "#ifdef _WIN32\n"
+        "      /* G2-Ultra (arch 15) is the validated native-context target. */\n"
+        "      break;\n"
+        "#endif\n"
+        "      if (!os_get_option(\"PAN_I_WANT_A_BROKEN_VULKAN_DRIVER\")) {"
+    ),
+    # Variant B: the icd-sync port drops arch 15 from the kbase-path
+    # warning list entirely (v15 kbase is officially supported upstream),
+    # which already achieves what the _WIN32 break did.  Nothing to edit.
+    (
+        "   case 6:\n   case 7:\n   case 14:\n"
+        "      if (!os_get_option(\"PAN_I_WANT_A_BROKEN_VULKAN_DRIVER\")) {",
+        "   case 6:\n   case 7:\n   case 14:\n"
+        "      if (!os_get_option(\"PAN_I_WANT_A_BROKEN_VULKAN_DRIVER\")) {"
+    ),
+])
 
 # The DRM-only init path is not built on Windows.  The kbase init after it is.
 wrap("src/panfrost/vulkan/panvk_physical_device.c",
@@ -1301,25 +1370,54 @@ sub_idem("src/panfrost/vulkan/panvk_device_memory.c",
     "#endif\n"
     "   else {\n")
 
-sub_idem("src/panfrost/vulkan/panvk_device_memory.c",
-    "      mem->bo = pan_kmod_bo_alloc(device->kmod.dev,\n"
-    "                                  can_be_exported ? NULL : device->kmod.vm,\n"
-    "                                  pAllocateInfo->allocationSize, bo_flags);\n",
-    "#ifdef _WIN32\n"
-    "      if (win32_hRTResource) {\n"
-    "         /* Shared D3D11 resource: only the runtime allocator can mint the\n"
-    "          * hKMResource the application shares.  SHARED_BACKING makes the\n"
-    "          * host import the memfd through udmabuf so the exported blob and\n"
-    "          * the GPU memory are the same pages; there is no exclusive VM\n"
-    "          * because another process may open the resource. */\n"
-    "         mem->bo = pan_kmod_bo_alloc_shared(\n"
-    "            device->kmod.dev, pAllocateInfo->allocationSize,\n"
-    "            bo_flags | PAN_KMOD_BO_FLAG_SHARED_BACKING, win32_hRTResource);\n"
-    "      } else\n"
-    "#endif\n"
-    "      mem->bo = pan_kmod_bo_alloc(device->kmod.dev,\n"
-    "                                  can_be_exported ? NULL : device->kmod.vm,\n"
-    "                                  pAllocateInfo->allocationSize, bo_flags);\n")
+sub_idem_either("src/panfrost/vulkan/panvk_device_memory.c", [
+    # Variant A: the original manet tree calls pan_kmod_bo_alloc().
+    (
+        "      mem->bo = pan_kmod_bo_alloc(device->kmod.dev,\n"
+        "                                  can_be_exported ? NULL : device->kmod.vm,\n"
+        "                                  pAllocateInfo->allocationSize, bo_flags);\n",
+        "#ifdef _WIN32\n"
+        "      if (win32_hRTResource) {\n"
+        "         /* Shared D3D11 resource: only the runtime allocator can mint the\n"
+        "          * hKMResource the application shares.  SHARED_BACKING makes the\n"
+        "          * host import the memfd through udmabuf so the exported blob and\n"
+        "          * the GPU memory are the same pages; there is no exclusive VM\n"
+        "          * because another process may open the resource. */\n"
+        "         mem->bo = pan_kmod_bo_alloc_shared(\n"
+        "            device->kmod.dev, pAllocateInfo->allocationSize,\n"
+        "            bo_flags | PAN_KMOD_BO_FLAG_SHARED_BACKING, win32_hRTResource);\n"
+        "      } else\n"
+        "#endif\n"
+        "      mem->bo = pan_kmod_bo_alloc(device->kmod.dev,\n"
+        "                                  can_be_exported ? NULL : device->kmod.vm,\n"
+        "                                  pAllocateInfo->allocationSize, bo_flags);\n"
+    ),
+    # Variant B: the icd-sync port (feat/icd-sync-dsotsin-20261119) calls
+    # pan_kmod_bo_alloc_at() with the opaque capture address.  The D3D
+    # runtime allocator path never carries a capture address.
+    (
+        "      mem->bo = pan_kmod_bo_alloc_at(\n"
+        "         device->kmod.dev, can_be_exported ? NULL : device->kmod.vm,\n"
+        "         pAllocateInfo->allocationSize, bo_flags,\n"
+        "         auto_capture ? capture_address : 0);\n",
+        "#ifdef _WIN32\n"
+        "      if (win32_hRTResource) {\n"
+        "         /* Shared D3D11 resource: only the runtime allocator can mint the\n"
+        "          * hKMResource the application shares.  SHARED_BACKING makes the\n"
+        "          * host import the memfd through udmabuf so the exported blob and\n"
+        "          * the GPU memory are the same pages; there is no exclusive VM\n"
+        "          * because another process may open the resource. */\n"
+        "         mem->bo = pan_kmod_bo_alloc_shared(\n"
+        "            device->kmod.dev, pAllocateInfo->allocationSize,\n"
+        "            bo_flags | PAN_KMOD_BO_FLAG_SHARED_BACKING, win32_hRTResource);\n"
+        "      } else\n"
+        "#endif\n"
+        "      mem->bo = pan_kmod_bo_alloc_at(\n"
+        "         device->kmod.dev, can_be_exported ? NULL : device->kmod.vm,\n"
+        "         pAllocateInfo->allocationSize, bo_flags,\n"
+        "         auto_capture ? capture_address : 0);\n"
+    ),
+])
 
 # pan_kmod: two optional Windows-only ops.  Keeping them separate from
 # bo_alloc() means no other backend has to grow a D3D parameter.
@@ -1674,24 +1772,53 @@ sub_idem("src/panfrost/compiler/bifrost/bi_opt_push_ubo.c",
 # Diagnostic: a failing init_kbase makes vkEnumeratePhysicalDevices return an
 # error (DXVK then aborts with "Failed to enumerate adapters"), and DWM has no
 # usable stderr.  Leave a breadcrumb the guest-side test can read.
-sub_idem("src/panfrost/vulkan/panvk_instance.c",
-    "   if (result != VK_SUCCESS) {\n"
-    "      vk_free(&instance->vk.alloc, device);\n"
-    "      if (result == VK_ERROR_INCOMPATIBLE_DRIVER)\n"
-    "         return VK_SUCCESS; /* no virtio WDDM adapter: zero devices */\n"
-    "      return result;\n"
-    "   }\n",
-    "   if (result != VK_SUCCESS) {\n"
-    "      FILE *f = fopen(\"C:\\\\panvk\\\\panvk_icd.log\", \"a\");\n"
-    "      if (f) {\n"
-    "         fprintf(f, \"enumerate: init_kbase -> %d\\n\", (int) result);\n"
-    "         fclose(f);\n"
-    "      }\n"
-    "      vk_free(&instance->vk.alloc, device);\n"
-    "      if (result == VK_ERROR_INCOMPATIBLE_DRIVER)\n"
-    "         return VK_SUCCESS; /* no virtio WDDM adapter: zero devices */\n"
-    "      return result;\n"
-    "   }\n")
+sub_idem_either("src/panfrost/vulkan/panvk_instance.c", [
+    # Variant A: the original manet enumerate result block.
+    (
+        "   if (result != VK_SUCCESS) {\n"
+        "      vk_free(&instance->vk.alloc, device);\n"
+        "      if (result == VK_ERROR_INCOMPATIBLE_DRIVER)\n"
+        "         return VK_SUCCESS; /* no virtio WDDM adapter: zero devices */\n"
+        "      return result;\n"
+        "   }\n",
+        "   if (result != VK_SUCCESS) {\n"
+        "      FILE *f = fopen(\"C:\\\\panvk\\\\panvk_icd.log\", \"a\");\n"
+        "      if (f) {\n"
+        "         fprintf(f, \"enumerate: init_kbase -> %d\\n\", (int) result);\n"
+        "         fclose(f);\n"
+        "      }\n"
+        "      vk_free(&instance->vk.alloc, device);\n"
+        "      if (result == VK_ERROR_INCOMPATIBLE_DRIVER)\n"
+        "         return VK_SUCCESS; /* no virtio WDDM adapter: zero devices */\n"
+        "      return result;\n"
+        "   }\n"
+    ),
+    # Variant B: the icd-sync port restructured the per-node loop (continue
+    # on INCOMPATIBLE_DRIVER instead of early VK_SUCCESS).  Same breadcrumb.
+    (
+        "      if (result != VK_SUCCESS) {\n"
+        "         vk_free(&instance->vk.alloc, device);\n"
+        "         /* No device at this path; try the next node. */\n"
+        "         if (result == VK_ERROR_INCOMPATIBLE_DRIVER)\n"
+        "            continue;\n"
+        "         /* A real failure; stop enumeration. */\n"
+        "         return result;\n"
+        "      }\n",
+        "      if (result != VK_SUCCESS) {\n"
+        "         FILE *f = fopen(\"C:\\\\panvk\\\\panvk_icd.log\", \"a\");\n"
+        "         if (f) {\n"
+        "            fprintf(f, \"enumerate: init_kbase -> %d\\n\", (int) result);\n"
+        "            fclose(f);\n"
+        "         }\n"
+        "         vk_free(&instance->vk.alloc, device);\n"
+        "         /* No device at this path; try the next node. */\n"
+        "         if (result == VK_ERROR_INCOMPATIBLE_DRIVER)\n"
+        "            continue;\n"
+        "         /* A real failure; stop enumeration. */\n"
+        "         return result;\n"
+        "      }\n"
+    ),
+])
 
 print(f"patch_mesa: {changes} edits applied, {len(misses)} anchors missing")
 for m in misses:

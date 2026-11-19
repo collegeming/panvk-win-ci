@@ -13,10 +13,11 @@ permissions:
 
 jobs:
   libpan:
-    # libpan and libpoly shaders are platform independent and already uploaded
-    # by run 43720536739.  Keep the job for a manual refresh, but skip it by
-    # default so the Windows iteration loop is several minutes shorter.
-    if: ${{ false }}
+    # libpan and libpoly shaders are platform independent SPIR-V + generated C.
+    # The ported mesa branch (feat/icd-sync-dsotsin-20261119) adds libpan
+    # sources (gs.cl among others) and reworks poly, so the prebuilt artifacts
+    # from run 43720536739 are stale: rebuild them from this branch on every
+    # dispatch instead of pinning the old run-id.
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -68,8 +69,27 @@ jobs:
           name: libpoly-prebuilt
           path: libpoly/
           if-no-files-found: error
+      - name: BCn shader headers
+        # The ported branch adds vulkan/bcn (BC1-7/ASTC decode + block-copy
+        # compute shaders).  Like libpan they are platform-independent
+        # generated headers, but the Windows runner has no glslang: bake them
+        # here with the same glslang -x commands the tree's own
+        # bcn/meson.build uses, and ship them as a prebuilt artifact.
+        run: |
+          cd mesa/src/panfrost/vulkan/bcn
+          glslangValidator -V --target-env spirv1.5 -x -o decode.spv.h decode.comp
+          glslangValidator -V --target-env spirv1.5 -DBC_DECODE_3D -x -o decode_3d.spv.h decode.comp
+          glslangValidator -V --target-env spirv1.5 -DBC_ENCODE_ASTC -x -o encode_astc.spv.h decode.comp
+          glslangValidator -V --target-env spirv1.5 -x -o copy_blocks.spv.h copy_blocks.comp
+          ls -la
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bcn-prebuilt
+          path: mesa/src/panfrost/vulkan/bcn/*.spv.h
+          if-no-files-found: error
 
   panvk:
+    needs: libpan
     runs-on: windows-11-arm
     timeout-minutes: 120
     steps:
@@ -78,13 +98,16 @@ jobs:
         with:
           name: libpan-prebuilt
           path: libpan
-          run-id: 43720536739
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
         with:
           name: libpoly-prebuilt
           path: libpoly
-          run-id: 43720536739
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: bcn-prebuilt
+          path: bcn
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
         with:
@@ -113,6 +136,10 @@ jobs:
           Copy-Item vendor\mesa-overlay\kbase_virtio.h mesa\src\panfrost\lib\kmod\kbase_virtio.h
           Copy-Item vendor\mesa-overlay\panvk_win_rt_stubs.c mesa\src\panfrost\vulkan\panvk_win_rt_stubs.c
           Copy-Item vendor\mesa-overlay\vulkan_manet.def mesa\src\panfrost\vulkan\vulkan_manet.def
+          # Prebuilt BCn shader headers (glslang -x output from the libpan
+          # job); patch_mesa wires them in place of the bcn/ custom_targets,
+          # which the Windows runner cannot run (no glslang).
+          Copy-Item bcn\*.spv.h mesa\src\panfrost\vulkan\bcn\ -Force
           Copy-Item vendor\win32-compat\malikm_ioctl.h, vendor\win32-compat\maliwddm_abi.h mesa\include\win32-compat\
           # 0003/0004/0006/0007/0011/0016/0025/0055 are rebased into
           # tools/patch_mesa.py with string anchors; a missing anchor fails
